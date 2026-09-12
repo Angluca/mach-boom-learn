@@ -1,0 +1,87 @@
+use std.runtime;
+use std.chrono.duration.SECOND;
+use boom;
+
+# Fixed-timestep game logic.
+#
+# Boom calls this function at the frequency specified by fixed_dt.
+# We don't have any game logic yet, so it is empty for now.
+fun tick(ctx: *boom.context.Context) {
+}
+
+# Rendering stage.
+#
+# We haven't learned about Renderer yet, so we don't draw anything for now.
+fun draw(ctx: *boom.context.Context) {
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    # Context is the core context of the Boom game runtime.
+    #
+    # Currently it is responsible for:
+    # - Window
+    # - Frame clock
+    # - Fixed timestep accumulator
+    # - Input event queue
+    var ctx: boom.context.Context;
+
+    # Create the game runtime configuration.
+    val cfg: boom.context.Config = boom.context.Config{
+        width:     1280,
+        height:    720,
+        title:     "Boom Example 01 - Hello Window",
+
+        # Game logic runs at a fixed timestep of 60 Hz.
+        fixed_dt:  SECOND / 60,
+
+        # Limit how much time a single frame can catch up.
+        #
+        # This is mainly used to avoid the engine entering a spiral of death
+        # after severe stuttering while trying to catch up on simulation time.
+        max_frame: SECOND / 4,
+
+        # The actual frame delta maintained by Boom's clock system.
+        #
+        # Setting it to 0 here is the initial value in the official example.
+        frame_dt:  0,
+    };
+
+    # Create Context, which also creates the window and runtime state.
+    #
+    # If initialization fails, return a non-zero status directly.
+    if (!boom.context.context_init(?ctx, cfg)) {
+        ret 1;
+    }
+
+    # Define the game lifecycle.
+    #
+    # Currently:
+    # f_init = unused
+    # f_tick = game logic
+    # f_draw = rendering
+    # f_dnit = unused
+    var app: boom.app.App = boom.app.App{
+        f_init: nil::fun(*boom.context.Context),
+        f_tick: tick,
+        f_draw: draw,
+        f_dnit: nil::fun(*boom.context.Context),
+    };
+
+    # Enter the Boom game main loop.
+    #
+    # Boom will be responsible for:
+    # 1. Handling window / input events
+    # 2. Running fixed-timestep update
+    # 3. Running render
+    # 4. Handling window close
+    #
+    # run returns the final program status.
+    val status: i64 = boom.engine.run(?ctx, ?app);
+
+    # Release resources owned by Context after the game loop ends.
+    boom.context.context_shutdown(?ctx);
+
+    ret status;
+}
+
