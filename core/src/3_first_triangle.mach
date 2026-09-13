@@ -1,0 +1,242 @@
+# Boom Tutorial 03: First Triangle
+#
+# In this lesson we learn:
+# 1. Vertex
+# 2. Position
+# 3. Normal
+# 4. UV / TexCoord
+# 5. VertexFormat
+# 6. Stride
+# 7. Index
+# 8. Mesh
+# 9. Camera
+# 10. Transform
+# 11. Draw Call
+#
+# This lesson does not use:
+# - Texture
+# - Material
+# - Custom Shader
+# - Physics
+#
+# Goal:
+# Prepare 3 Vertices and 3 Indices ourselves,
+# use Boom's Mesh API to create a Triangle,
+# and finally display it through a 3D Render Pass.
+
+use std.runtime;
+use std.print;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.result.Result;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.context.context_shutdown;
+use boom.engine.run;
+use boom.app.App;
+use gfx: boom.graphics;
+use vert: boom.graphics.vertex;
+use gm: boom.math;
+
+rec Game {
+    renderer: gfx.Renderer;
+    mesh: gfx.Mesh;
+    camera: gfx.Camera;
+    transform: gm.Transform;
+    ready: bool;
+}
+
+fun on_init(ctx: *Context) {
+    val game: *Game = context_user(ctx)::*Game;
+    game.ready = false;
+
+    val width: i32 = ctx.window.width;
+    val height: i32 = ctx.window.height;
+
+    # Initialize Renderer.
+    val renderer_result: Result[bool, gfx.Error] = gfx.renderer_init(?game.renderer, ctx.window.handle, width, height);
+
+    # Check whether Renderer initialization returned an error.
+    if (is_err[bool, gfx.Error](renderer_result)) {
+        var error: gfx.Error = unwrap_err[bool, gfx.Error](renderer_result);
+        print.eprintlnf("Renderer initialization failed: {}", gfx.error_msg(?error));
+        ret;
+    }
+
+    val device: *gfx.Device = gfx.renderer_device(?game.renderer);
+
+    # Triangle's Vertex data.
+    #
+    # Standard 3D Vertex Layout:
+    # Position(3) + Normal(3) + UV(2)
+    #
+    # Each Vertex:
+    # 8 × f32 = 32 bytes.
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0: Position(3) + Normal(3) + UV(2)
+        -0.8, -0.6, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         0.8, -0.6, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.8, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    # Indices 0, 1, 2 form a Triangle.
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: vert.VertexFormat = vert.vertex_format_standard();
+    val mesh_result: Result[gfx.Mesh, gfx.Error] = gfx.mesh(device, (?vertices[0])::ptr, 3, ?format, (?indices[0])::ptr, 3);
+
+    # Check whether Mesh creation returned an error.
+    if (is_err[gfx.Mesh, gfx.Error](mesh_result)) {
+        var error: gfx.Error = unwrap_err[gfx.Mesh, gfx.Error](mesh_result);
+        print.eprintlnf("Mesh creation failed: {}", gfx.error_msg(?error));
+        gfx.renderer_dnit(?game.renderer);
+        ret;
+    }
+
+    game.mesh = unwrap_ok[gfx.Mesh, gfx.Error](mesh_result);
+
+    # Create Perspective Camera.
+    #
+    # position = (0, 0, 3)
+    # target = (0, 0, 0)
+    # FOV = 60°
+    # near = 0.1
+    # far = 100.0
+    val aspect: f32 = width::f32 / height::f32;
+    game.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 3.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # Identity Transform:
+    # Position = (0, 0, 0)
+    # Rotation = no rotation
+    # Scale = (1, 1, 1)
+    game.transform = gm.transform_identity();
+    game.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    # This lesson has no game simulation for now.
+}
+
+fun on_draw(ctx: *Context) {
+    val game: *Game = context_user(ctx)::*Game;
+
+    if (!game.ready) {
+        ret;
+    }
+
+    val width: f32 = ctx.window.width::f32;
+    val height: f32 = ctx.window.height::f32;
+
+    # Prevent division by zero when the window is minimized.
+    if (width <= 0.0 || height <= 0.0) {
+        ret;
+    }
+
+    # The Window can Resize, so the Camera's Aspect Ratio must be updated accordingly.
+    game.camera.aspect = width / height;
+
+    var opened: bool = false;
+    val begin_result: Result[bool, gfx.Error] = gfx.renderer_begin_frame(?game.renderer, ?opened);
+
+    # Check whether Begin Frame returned an error.
+    if (is_err[bool, gfx.Error](begin_result)) {
+        var error: gfx.Error = unwrap_err[bool, gfx.Error](begin_result);
+        print.eprintlnf("Error while beginning Frame: {}", gfx.error_msg(?error));
+        ret;
+    }
+
+    # Check whether the current Frame is truly opened.
+    if (!opened) {
+        ret;
+    }
+
+    # Create 3D Scene Pass.
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(?game.camera);
+    pass_desc.cull = 0;
+    pass_desc.clear = 1;
+    pass_desc.clear_color = gm.vec4(0.05, 0.06, 0.09, 1.0);
+
+    var pass: gfx.Pass = gfx.pass_begin(?game.renderer, ?pass_desc);
+
+    # Draw Call: Mesh + Transform.
+    gfx.pass_draw(?pass, ?game.mesh, ?game.transform);
+
+    gfx.pass_end(?pass);
+
+    val end_result: Result[bool, gfx.Error] = gfx.renderer_end_frame(?game.renderer);
+
+    # Check whether End Frame returned an error.
+    if (is_err[bool, gfx.Error](end_result)) {
+        var error: gfx.Error = unwrap_err[bool, gfx.Error](end_result);
+        print.eprintlnf("Error while ending Frame: {}", gfx.error_msg(?error));
+        ret;
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val game: *Game = context_user(ctx)::*Game;
+
+    if (!game.ready) {
+        ret;
+    }
+
+    # Mesh is created using the Renderer's Device, so Mesh must be deleted first, then Renderer destroyed.
+    val device: *gfx.Device = gfx.renderer_device(?game.renderer);
+    gfx.mesh_delete(device, ?game.mesh);
+    gfx.renderer_dnit(?game.renderer);
+    game.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width: 1280,
+        height: 720,
+        title: "Boom Example 03 - First Triangle",
+        fixed_dt: SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+    };
+
+    # Check whether Context initialization failed.
+    if (!context_init(?ctx, cfg)) {
+        print.eprintln("Context initialization failed");
+        ret 1;
+    }
+
+    context_set_user(?ctx, (?game)::ptr);
+
+    val status: i64 = run(?ctx, ?app);
+    context_shutdown(?ctx);
+
+    ret status;
+}
+

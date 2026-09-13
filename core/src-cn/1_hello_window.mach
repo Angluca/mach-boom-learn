@@ -1,15 +1,15 @@
 # ============================================================
-# Boom Tutorial 01: Hello Window
+# Boom 教程 01：Hello Window
 #
-# Goals of this lesson:
+# 本课目标：
 #
-# 1. Create a Boom Context
-# 2. Create a window
-# 3. Set up the App lifecycle
-# 4. Enter the Boom Game Loop
-# 5. Shut down the program correctly
+# 1. 创建 Boom Context
+# 2. 创建窗口
+# 3. 建立 App 生命周期
+# 4. 进入 Boom Game Loop
+# 5. 正确关闭程序
 #
-# This lesson does not yet cover:
+# 本课暂时不涉及：
 #
 # - Renderer
 # - Texture
@@ -18,7 +18,7 @@
 # - Camera
 # - Audio
 #
-# We will first establish the most basic Boom program lifecycle.
+# 我们先建立最基本的 Boom 程序生命周期。
 # ============================================================
 
 
@@ -41,11 +41,11 @@ use boom.app.App;
 # ============================================================
 # on_init
 #
-# Game initialization stage.
+# 游戏初始化阶段。
 #
-# Boom calls this once after entering the Game Loop.
+# Boom 在进入 Game Loop 后调用一次。
 #
-# There are currently no game resources to initialize, so it is empty for now.
+# 当前没有需要初始化的游戏资源，所以暂时为空。
 # ============================================================
 fun on_init(ctx: *Context) {
 }
@@ -54,18 +54,18 @@ fun on_init(ctx: *Context) {
 # ============================================================
 # on_tick
 #
-# Fixed-timestep game logic update.
+# 固定时间步的游戏逻辑更新。
 #
-# Later this will contain:
+# 这里以后会放：
 #
-# - Player movement
-# - Game state updates
+# - 玩家移动
+# - 游戏状态更新
 # - AI
 # - Animation
 # - Physics
 #
-# Boom's tick uses a fixed timestep,
-# so this belongs to "game simulation" rather than simple screen refresh.
+# Boom 的 tick 使用 fixed timestep，
+# 因此这里属于“游戏模拟”而不是单纯的画面刷新。
 # ============================================================
 fun on_tick(ctx: *Context) {
 }
@@ -74,10 +74,10 @@ fun on_tick(ctx: *Context) {
 # ============================================================
 # on_draw
 #
-# Rendering stage.
+# 渲染阶段。
 #
-# We haven't learned about Renderer yet,
-# so this lesson does not draw anything for now.
+# 当前还没有学习 Renderer，
+# 所以这一课暂时不进行任何绘制。
 # ============================================================
 fun on_draw(ctx: *Context) {
 }
@@ -86,17 +86,17 @@ fun on_draw(ctx: *Context) {
 # ============================================================
 # on_dnit
 #
-# Called once when the game ends.
+# 游戏结束时调用一次。
 #
-# Later this will be responsible for:
+# 以后这里会负责：
 #
-# - Destroying game resources
-# - Releasing Texture
-# - Releasing Mesh
-# - Releasing Audio
-# - Releasing other resources that need explicit management
+# - 销毁游戏资源
+# - 释放 Texture
+# - 释放 Mesh
+# - 释放 Audio
+# - 释放其他需要显式管理的资源
 #
-# There are currently no game resources to release.
+# 当前没有需要释放的游戏资源。
 # ============================================================
 fun on_dnit(ctx: *Context) {
 }
@@ -105,14 +105,14 @@ fun on_dnit(ctx: *Context) {
 # ============================================================
 # main
 #
-# Program entry point.
+# 程序入口。
 # ============================================================
 #[symbol("main")]
 fun main(argc: i64, argv: **u8) i64 {
     # --------------------------------------------------------
-    # Create App
+    # 创建 App
     #
-    # App describes Boom's game lifecycle.
+    # App 描述 Boom 的游戏生命周期。
     # --------------------------------------------------------
     var app: App;
 
@@ -123,23 +123,23 @@ fun main(argc: i64, argv: **u8) i64 {
 
 
     # --------------------------------------------------------
-    # Create Context
+    # 创建 Context
     #
-    # Context is Boom's core runtime context.
+    # Context 是 Boom 的核心运行时上下文。
     #
-    # It is responsible for managing:
+    # 它负责管理：
     #
     # - Window
     # - Input
     # - Clock
     # - Fixed timestep accumulator
-    # - Other runtime state
+    # - 其他运行时状态
     # --------------------------------------------------------
     var ctx: Context;
 
 
     # --------------------------------------------------------
-    # Configure Boom
+    # 配置 Boom
     # --------------------------------------------------------
     val cfg: Config = Config{
         width: 1280,
@@ -147,61 +147,61 @@ fun main(argc: i64, argv: **u8) i64 {
 
         title: "Boom Example 01 - Hello Window",
 
-        # Fixed timestep:
+        # 固定时间步：
         #
-        # 1 second / 60
+        # 1 秒 / 60
         #
-        # That is:
+        # 即：
         #
-        # 0.016666... seconds
+        # 0.016666... 秒
         # ≈ 16.67 ms
         #
-        # Therefore the target Simulation Rate is 60 Hz.
+        # 因此目标 Simulation Rate 为 60 Hz。
         fixed_dt: SECOND / 60,
 
-        # Maximum Frame Delta:
+        # 最大 Frame Delta：
         #
-        # Limit how much time a single Frame can catch up to the simulation system.
+        # 限制一次 Frame 最多向模拟系统追赶多少时间。
         #
-        # Mainly used to avoid
-        # Spiral of Death during severe stuttering.
+        # 主要用于避免严重卡顿时出现
+        # Spiral of Death（死亡螺旋）。
         max_frame: 250 * MILLISECOND,
 
-        # Lesson 1 does not need to pre-set the actual Frame Delta.
+        # 第一课不需要预先设置实际 Frame Delta。
         frame_dt: 0,
     };
 
 
     # --------------------------------------------------------
-    # Initialize Context
+    # 初始化 Context
     # --------------------------------------------------------
     #
-    # context_init() returns bool:
+    # context_init() 返回 bool：
     #
     # true
-    #     initialization succeeded
+    #     初始化成功
     #
     # false
-    #     initialization failed
+    #     初始化失败
     #
-    # Note:
+    # 注意：
     #
-    # "false" is the return value of context_init(),
-    # "ret 1" is our own process exit status.
+    # “false”是 context_init() 的返回值，
+    # “ret 1”是我们自己的进程退出状态。
     #
-    # Do not confuse these two concepts.
+    # 这两个概念不要混在一起。
     # --------------------------------------------------------
     if (!context_init(?ctx, cfg)) {
-        # Return 1 on initialization failure.
+        # 初始化失败时返回 1。
         ret 1;
     }
 
 
     # --------------------------------------------------------
-    # Enter Boom Game Loop
+    # 进入 Boom Game Loop
     # --------------------------------------------------------
     #
-    # Boom will be responsible for:
+    # Boom 会负责：
     #
     # Window / Input Poll
     #        ↓
@@ -209,22 +209,22 @@ fun main(argc: i64, argv: **u8) i64 {
     #        ↓
     # Render
     #        ↓
-    # Next frame
+    # 下一帧
     #
-    # until the window is closed.
+    # 直到窗口被关闭。
     val status: i64 = run(?ctx, ?app);
 
 
     # --------------------------------------------------------
-    # Shut down Context
+    # 关闭 Context
     #
-    # After the Game Loop ends,
-    # release runtime resources owned by Context.
+    # Game Loop 结束以后，
+    # 释放 Context 所拥有的运行时资源。
     # --------------------------------------------------------
     context_shutdown(?ctx);
 
 
-    # Return Boom's final running status to the operating system.
+    # 将 Boom 最终运行状态返回给操作系统。
     ret status;
 }
 

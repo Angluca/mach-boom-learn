@@ -1,0 +1,242 @@
+# Boom 教程 03：First Triangle
+#
+# 本课学习：
+# 1. Vertex（顶点）
+# 2. Position（位置）
+# 3. Normal（法线）
+# 4. UV / TexCoord（纹理坐标）
+# 5. VertexFormat（顶点布局）
+# 6. Stride（顶点步长）
+# 7. Index（索引）
+# 8. Mesh（网格）
+# 9. Camera（摄像机）
+# 10. Transform（变换）
+# 11. Draw Call（绘制调用）
+#
+# 本课不使用：
+# - Texture
+# - Material
+# - 自定义 Shader
+# - Physics
+#
+# 目标：
+# 自己准备 3 个 Vertex 和 3 个 Index，
+# 使用 Boom 的 Mesh API 创建一个 Triangle，
+# 最后通过 3D Render Pass 将它显示出来。
+
+use std.runtime;
+use std.print;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.result.Result;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.context.context_shutdown;
+use boom.engine.run;
+use boom.app.App;
+use gfx: boom.graphics;
+use vert: boom.graphics.vertex;
+use gm: boom.math;
+
+rec Game {
+    renderer: gfx.Renderer;
+    mesh: gfx.Mesh;
+    camera: gfx.Camera;
+    transform: gm.Transform;
+    ready: bool;
+}
+
+fun on_init(ctx: *Context) {
+    val game: *Game = context_user(ctx)::*Game;
+    game.ready = false;
+
+    val width: i32 = ctx.window.width;
+    val height: i32 = ctx.window.height;
+
+    # 初始化 Renderer。
+    val renderer_result: Result[bool, gfx.Error] = gfx.renderer_init(?game.renderer, ctx.window.handle, width, height);
+
+    # 判断 Renderer 初始化是否错误。
+    if (is_err[bool, gfx.Error](renderer_result)) {
+        var error: gfx.Error = unwrap_err[bool, gfx.Error](renderer_result);
+        print.eprintlnf("Renderer 初始化失败: {}", gfx.error_msg(?error));
+        ret;
+    }
+
+    val device: *gfx.Device = gfx.renderer_device(?game.renderer);
+
+    # Triangle 的 Vertex 数据。
+    #
+    # 标准 3D Vertex Layout：
+    # Position(3) + Normal(3) + UV(2)
+    #
+    # 每个 Vertex：
+    # 8 × f32 = 32 bytes。
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0: Position(3) + Normal(3) + UV(2)
+        -0.8, -0.6, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         0.8, -0.6, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.8, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    # 0、1、2 三个索引组成一个 Triangle。
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: vert.VertexFormat = vert.vertex_format_standard();
+    val mesh_result: Result[gfx.Mesh, gfx.Error] = gfx.mesh(device, (?vertices[0])::ptr, 3, ?format, ?indices[0], 3);
+
+    # 判断 Mesh 创建是否错误。
+    if (is_err[gfx.Mesh, gfx.Error](mesh_result)) {
+        var error: gfx.Error = unwrap_err[gfx.Mesh, gfx.Error](mesh_result);
+        print.eprintlnf("Mesh 创建失败: {}", gfx.error_msg(?error));
+        gfx.renderer_dnit(?game.renderer);
+        ret;
+    }
+
+    game.mesh = unwrap_ok[gfx.Mesh, gfx.Error](mesh_result);
+
+    # 创建 Perspective Camera。
+    #
+    # position = (0, 0, 3)
+    # target = (0, 0, 0)
+    # FOV = 60°
+    # near = 0.1
+    # far = 100.0
+    val aspect: f32 = width::f32 / height::f32;
+    game.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 3.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # Identity Transform：
+    # Position = (0, 0, 0)
+    # Rotation = 无旋转
+    # Scale = (1, 1, 1)
+    game.transform = gm.transform_identity();
+    game.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    # 本课暂时没有游戏模拟。
+}
+
+fun on_draw(ctx: *Context) {
+    val game: *Game = context_user(ctx)::*Game;
+
+    if (!game.ready) {
+        ret;
+    }
+
+    val width: f32 = ctx.window.width::f32;
+    val height: f32 = ctx.window.height::f32;
+
+    # 防止窗口最小化时出现除0, 0的窗口大小不用画任何内容
+    if (width <= 0.0 || height <= 0.0) {
+        ret;
+    }
+
+    # Window 可以 Resize，因此 Camera 的 Aspect Ratio 要同步更新。
+    game.camera.aspect = width / height;
+
+    var opened: bool = false;
+    val begin_result: Result[bool, gfx.Error] = gfx.renderer_begin_frame(?game.renderer, ?opened);
+
+    # 判断 Begin Frame 是否错误。
+    if (is_err[bool, gfx.Error](begin_result)) {
+        var error: gfx.Error = unwrap_err[bool, gfx.Error](begin_result);
+        print.eprintlnf("开始 Frame 时发生错误: {}", gfx.error_msg(?error));
+        ret;
+    }
+
+    # 判断当前 Frame 是否真正打开。
+    if (!opened) {
+        ret;
+    }
+
+    # 创建 3D Scene Pass。
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(?game.camera);
+    pass_desc.cull = 0;
+    pass_desc.clear = 1;
+    pass_desc.clear_color = gm.vec4(0.05, 0.06, 0.09, 1.0);
+
+    var pass: gfx.Pass = gfx.pass_begin(?game.renderer, ?pass_desc);
+
+    # Draw Call：Mesh + Transform。
+    gfx.pass_draw(?pass, ?game.mesh, ?game.transform);
+
+    gfx.pass_end(?pass);
+
+    val end_result: Result[bool, gfx.Error] = gfx.renderer_end_frame(?game.renderer);
+
+    # 判断 End Frame 是否错误。
+    if (is_err[bool, gfx.Error](end_result)) {
+        var error: gfx.Error = unwrap_err[bool, gfx.Error](end_result);
+        print.eprintlnf("结束 Frame 时发生错误: {}", gfx.error_msg(?error));
+        ret;
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val game: *Game = context_user(ctx)::*Game;
+
+    if (!game.ready) {
+        ret;
+    }
+
+    # Mesh 使用 Renderer 的 Device 创建，所以必须先删除 Mesh，再销毁 Renderer。
+    val device: *gfx.Device = gfx.renderer_device(?game.renderer);
+    gfx.mesh_delete(device, ?game.mesh);
+    gfx.renderer_dnit(?game.renderer);
+    game.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width: 1280,
+        height: 720,
+        title: "Boom Example 03 - First Triangle",
+        fixed_dt: SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+    };
+
+    # 判断 Context 初始化是否失败。
+    if (!context_init(?ctx, cfg)) {
+        print.eprintln("Context 初始化失败");
+        ret 1;
+    }
+
+    context_set_user(?ctx, (?game)::ptr);
+
+    val status: i64 = run(?ctx, ?app);
+    context_shutdown(?ctx);
+
+    ret status;
+}
+

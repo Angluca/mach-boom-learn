@@ -1,0 +1,392 @@
+# Boom 教程 02：Clear Screen
+#
+# 本课学习：
+# 1. 初始化 Renderer
+# 2. 开始一帧 Graphics Frame
+# 3. 创建一个 Render Pass
+# 4. 清除窗口颜色缓冲
+# 5. 结束 Render Pass
+# 6. 提交并显示这一帧
+#
+# 本课暂时不画任何物体。
+use std.runtime;
+use std.print;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.result.Result;
+use std.types.result.is_err;
+use std.types.result.unwrap_err;
+
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.context.context_shutdown;
+use boom.engine.run;
+use boom.app.App;
+use gfx: boom.graphics;
+use gm: boom.math;
+
+# 当前教程的游戏状态。
+#
+# 目前只有 Renderer 和 ready。
+#
+# 后面的教程会继续往这里增加：
+# - Texture
+# - Camera
+# - Player
+# - Physics
+# - Audio
+# 等游戏状态。
+rec Game {
+    renderer: gfx.Renderer;
+
+    # Renderer 是否成功初始化。
+    #
+    # false = 失败
+    # true = 初始化成功
+    ready: bool;
+}
+
+# 游戏启动时调用一次。
+fun on_init(ctx: *Context) {
+    val game: *Game = context_user(ctx)::*Game;
+
+    # 变量 默认都是0和false, 你也可以不写这条
+    game.ready = false;
+
+    # 当前窗口的实际尺寸。
+    #
+    # Renderer 创建时需要知道 framebuffer 的初始尺寸。
+    val width: i32 = ctx.window.width;
+    val height: i32 = ctx.window.height;
+
+    # 为当前窗口创建 Renderer。
+    #
+    # 一个窗口对应一个 Renderer。
+    #
+    # Renderer 会拥有：
+    # - Vulkan device
+    # - swapchain
+    # - frame loop
+    # - renderer resources
+    #
+    # renderer_init() 使用默认的 PRESENT_VSYNC。
+    val result: Result[bool, gfx.Error] =
+        gfx.renderer_init(
+            ?game.renderer,
+            ctx.window.handle,
+            width,
+            height,
+        );
+
+    # 如果 Renderer 初始化失败：
+    #
+    # 1. 取出错误
+    # 2. 打印错误信息
+    # 3. 保持 ready = false
+    #
+    # run 仍然可以安全返回，
+    # 后面的 on_draw 会因为 ready == false 而直接跳过。
+    if (is_err[bool, gfx.Error](result)) {
+        var error: gfx.Error =
+            unwrap_err[bool, gfx.Error](result);
+
+        print.eprintlnf(
+            "Renderer 初始化失败: {}",
+            gfx.error_msg(?error),
+        );
+
+        ret;
+    }
+
+    game.ready = true;
+}
+
+# 固定时间步的游戏逻辑。
+#
+# 本课没有任何游戏模拟。
+#
+# 后面会在这里加入：
+# - 玩家移动
+# - 动画更新
+# - Physics
+# - AI
+# - 游戏状态
+fun on_tick(ctx: *Context) {
+}
+
+# 每一帧执行一次渲染。
+fun on_draw(ctx: *Context) {
+    val game: *Game = context_user(ctx)::*Game;
+
+    # Renderer 没有成功初始化时，不进行任何绘制。
+    if (!game.ready) {
+        ret;
+    }
+
+    # ------------------------------
+    # 1. 开始 Graphics Frame
+    # ------------------------------
+    #
+    # opened 的含义非常重要：
+    #
+    # true
+    #     当前这一帧真正打开，可以记录绘制命令。
+    #
+    # false
+    #     swapchain 发生变化并刚刚完成重建，
+    #     当前帧应该直接跳过。
+    #
+    # 窗口 resize 就可能触发这种情况。
+    var opened: bool = false;
+
+    val begin_result: Result[bool, gfx.Error] =
+        gfx.renderer_begin_frame(
+            ?game.renderer,
+            ?opened,
+        );
+
+    # begin_frame 是否发生错误。
+    if (is_err[bool, gfx.Error](begin_result)) {
+        var error: gfx.Error =
+            unwrap_err[bool, gfx.Error](begin_result);
+
+        print.eprintlnf(
+            "开始 Frame 失败: {}",
+            gfx.error_msg(?error),
+        );
+
+        ret;
+    }
+
+    # swapchain 被重建时跳过当前 Frame。
+    #
+    # 注意：
+    # false 不是“Renderer 出错”。
+    #
+    # 它表示这一帧没有真正打开成功，
+    # 当前应该跳过绘制，等待下一帧。
+    if (!opened) {
+        ret;
+    }
+
+    # ------------------------------
+    # 2. 创建一个窗口 Render Pass
+    # ------------------------------
+    #
+    # target = nil
+    #     绘制到目标, nil表示直接绘制到窗口
+    #
+    # perspective = 0
+    #     不是 3D perspective pass。
+    #
+    # camera = nil
+    # camera2d = nil
+    #     本课没有 Camera。
+    #
+    # clear = 1
+    #     要清除颜色 attachment。
+    #
+    # clear_color
+    #     指定清除成什么颜色。
+    #
+    # depth
+    #     使用普通的 forward depth convention。
+    #
+    # cull
+    #     本课没有 draw，所以这里没有实际影响。
+    var pass_desc: gfx.PassDesc = gfx.PassDesc{
+        target:      nil,
+        perspective: 0,
+        camera:      nil,
+        camera2d:    nil,
+
+        # 1 = Clear
+        clear:       1,
+
+        # RGBA
+        #
+        # 深蓝灰色：
+        # R = 0.05
+        # G = 0.06
+        # B = 0.09
+        # A = 1.00
+        clear_color: gm.vec4(
+            0.05,
+            0.06,
+            0.09,
+            1.0,
+        ),
+
+        depth: gfx.DEPTH_FORWARD,
+
+        # 本课不绘制任何几何体，
+        # 所以关闭 Cull 没有实际成本。
+        cull: 0,
+    };
+
+    # ------------------------------
+    # 3. 开始 Render Pass
+    # ------------------------------
+    #
+    # 这里真正执行 Clear。
+    #
+    # 对于窗口目标：
+    #
+    # renderer_begin_frame()
+    #     ↓
+    # 窗口 Render Pass 已经处于记录状态
+    #     ↓
+    # pass_begin()
+    #     ↓
+    # clear_mid_pass()
+    #
+    # 也就是说：
+    # clear = 1
+    # clear_color = ...
+    #
+    # 最终会把窗口的颜色 attachment 清除成我们指定的颜色。
+    var pass: gfx.Pass =
+        gfx.pass_begin(
+            ?game.renderer,
+            ?pass_desc,
+        );
+
+    # 本课没有任何 Draw Call。
+    #
+    # 下一课开始我们才会真正：
+    # - Draw Sprite
+    # - Draw Mesh
+    # - Draw Triangle
+    # 等等。
+
+    # ------------------------------
+    # 4. 结束 Render Pass
+    # ------------------------------
+    gfx.pass_end(?pass);
+
+    # ------------------------------
+    # 5. 提交 Frame 并 Present
+    # ------------------------------
+    #
+    # renderer_end_frame() 会：
+    #
+    # - 完成当前 command buffer
+    # - 提交 GPU 工作
+    # - Present swapchain image
+    #
+    # 最终我们才能真正看到这一帧。
+    val end_result: Result[bool, gfx.Error] =
+        gfx.renderer_end_frame(
+            ?game.renderer,
+        );
+
+    # End Frame 是否失败。
+    if (is_err[bool, gfx.Error](end_result)) {
+        var error: gfx.Error =
+            unwrap_err[bool, gfx.Error](end_result);
+
+        print.eprintlnf(
+            "结束 Frame 失败: {}",
+            gfx.error_msg(?error),
+        );
+
+        ret;
+    }
+}
+
+# 游戏结束时调用一次。
+fun on_dnit(ctx: *Context) {
+    val game: *Game = context_user(ctx)::*Game;
+
+    # Renderer 没有成功初始化，
+    # 就没有资源需要释放。
+    if (!game.ready) {
+        ret;
+    }
+
+    # Renderer 拥有它自己的 GPU device，
+    # 因此 Renderer 最后再释放。
+    gfx.renderer_dnit(?game.renderer);
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    # 游戏自己的状态。
+    var game: Game;
+
+    # ------------------------------
+    # Boom App 生命周期
+    # ------------------------------
+    #
+    # 按统一的 on_* 命名方式组织。
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    # ------------------------------
+    # 初始化 Context
+    # ------------------------------
+    var ctx: Context;
+
+    val cfg: Config = Config{
+        width:     1280,
+        height:    720,
+
+        title: "Boom Example 02 - Clear Screen",
+
+        # 游戏逻辑固定 60 Hz。
+        fixed_dt: SECOND / 60,
+
+        # 最大单帧时间。
+        #
+        # 防止发生严重卡顿以后，
+        # fixed timestep 为追赶时间而进入 spiral of death。
+        max_frame: 250 * MILLISECOND,
+    };
+
+    # 如果初始化返回 false，
+    # 说明 Boom Context 初始化失败。
+    if (!context_init(?ctx, cfg)) {
+        print.eprintln("Context 初始化失败");
+        ret 1;
+    }
+
+    # 将 Game 状态交给 Boom Context。
+    #
+    # on_init / on_tick / on_draw / on_dnit
+    # 都可以通过 context_user() 找回 Game。
+    context_set_user(?ctx, (?game)::ptr);
+
+    # ------------------------------
+    # 运行游戏主循环
+    # ------------------------------
+    #
+    # Boom 负责：
+    #
+    # poll
+    #   ↓
+    # fixed update
+    #   ↓
+    # render
+    #   ↓
+    # next frame
+    #
+    # 直到窗口关闭。
+    val status: i64 = run(?ctx, ?app);
+
+    # ------------------------------
+    # 关闭 Context
+    # ------------------------------
+    context_shutdown(?ctx);
+
+    ret status;
+}
+

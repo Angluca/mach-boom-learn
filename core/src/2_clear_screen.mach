@@ -1,0 +1,392 @@
+# Boom Tutorial 02: Clear Screen
+#
+# In this lesson we learn:
+# 1. Initialize Renderer
+# 2. Begin a Graphics Frame
+# 3. Create a Render Pass
+# 4. Clear the window color buffer
+# 5. End the Render Pass
+# 6. Submit and present this frame
+#
+# This lesson does not draw any objects yet.
+use std.runtime;
+use std.print;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.result.Result;
+use std.types.result.is_err;
+use std.types.result.unwrap_err;
+
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.context.context_shutdown;
+use boom.engine.run;
+use boom.app.App;
+use gfx: boom.graphics;
+use gm: boom.math;
+
+# Game state for the current tutorial.
+#
+# Currently only Renderer and ready.
+#
+# Later tutorials will keep adding:
+# - Texture
+# - Camera
+# - Player
+# - Physics
+# - Audio
+# and other game state.
+rec Game {
+    renderer: gfx.Renderer;
+
+    # Whether the Renderer was initialized successfully.
+    #
+    # false = failed
+    # true = initialization succeeded
+    ready: bool;
+}
+
+# Called once when the game starts.
+fun on_init(ctx: *Context) {
+    val game: *Game = context_user(ctx)::*Game;
+
+    # Variables default to 0 and false, so you can also omit this line
+    game.ready = false;
+
+    # Actual size of the current window.
+    #
+    # Renderer needs to know the initial framebuffer size when created.
+    val width: i32 = ctx.window.width;
+    val height: i32 = ctx.window.height;
+
+    # Create a Renderer for the current window.
+    #
+    # One window corresponds to one Renderer.
+    #
+    # Renderer owns:
+    # - Vulkan device
+    # - swapchain
+    # - frame loop
+    # - renderer resources
+    #
+    # renderer_init() uses the default PRESENT_VSYNC.
+    val result: Result[bool, gfx.Error] =
+        gfx.renderer_init(
+            ?game.renderer,
+            ctx.window.handle,
+            width,
+            height,
+        );
+
+    # If Renderer initialization fails:
+    #
+    # 1. Extract the error
+    # 2. Print the error message
+    # 3. Keep ready = false
+    #
+    # run can still return safely,
+    # and later on_draw will skip directly because ready == false.
+    if (is_err[bool, gfx.Error](result)) {
+        var error: gfx.Error =
+            unwrap_err[bool, gfx.Error](result);
+
+        print.eprintlnf(
+            "Renderer initialization failed: {}",
+            gfx.error_msg(?error),
+        );
+
+        ret;
+    }
+
+    game.ready = true;
+}
+
+# Fixed-timestep game logic.
+#
+# This lesson has no game simulation.
+#
+# Later this will contain:
+# - Player movement
+# - Animation updates
+# - Physics
+# - AI
+# - Game state
+fun on_tick(ctx: *Context) {
+}
+
+# Render once per frame.
+fun on_draw(ctx: *Context) {
+    val game: *Game = context_user(ctx)::*Game;
+
+    # When Renderer has not been initialized successfully, do not draw anything.
+    if (!game.ready) {
+        ret;
+    }
+
+    # ------------------------------
+    # 1. Begin Graphics Frame
+    # ------------------------------
+    #
+    # The meaning of opened is very important:
+    #
+    # true
+    #     This frame is truly opened, and draw commands can be recorded.
+    #
+    # false
+    #     The swapchain changed and has just been rebuilt,
+    #     so this frame should be skipped directly.
+    #
+    # A window resize can trigger this situation.
+    var opened: bool = false;
+
+    val begin_result: Result[bool, gfx.Error] =
+        gfx.renderer_begin_frame(
+            ?game.renderer,
+            ?opened,
+        );
+
+    # Whether begin_frame produced an error.
+    if (is_err[bool, gfx.Error](begin_result)) {
+        var error: gfx.Error =
+            unwrap_err[bool, gfx.Error](begin_result);
+
+        print.eprintlnf(
+            "Failed to begin frame: {}",
+            gfx.error_msg(?error),
+        );
+
+        ret;
+    }
+
+    # Skip the current Frame when the swapchain is rebuilt.
+    #
+    # Note:
+    # false does not mean "Renderer error".
+    #
+    # It means this frame was not truly opened successfully,
+    # and we should skip drawing now and wait for the next frame.
+    if (!opened) {
+        ret;
+    }
+
+    # ------------------------------
+    # 2. Create a window Render Pass
+    # ------------------------------
+    #
+    # target = nil
+    #     Draw target; nil means draw directly to the window
+    #
+    # perspective = 0
+    #     Not a 3D perspective pass.
+    #
+    # camera = nil
+    # camera2d = nil
+    #     This lesson has no Camera.
+    #
+    # clear = 1
+    #     Clear the color attachment.
+    #
+    # clear_color
+    #     Specifies what color to clear to.
+    #
+    # depth
+    #     Use the normal forward depth convention.
+    #
+    # cull
+    #     This lesson has no draw calls, so it has no actual effect here.
+    var pass_desc: gfx.PassDesc = gfx.PassDesc{
+        target:      nil,
+        perspective: 0,
+        camera:      nil,
+        camera2d:    nil,
+
+        # 1 = Clear
+        clear:       1,
+
+        # RGBA
+        #
+        # Dark blue-gray:
+        # R = 0.05
+        # G = 0.06
+        # B = 0.09
+        # A = 1.00
+        clear_color: gm.vec4(
+            0.05,
+            0.06,
+            0.09,
+            1.0,
+        ),
+
+        depth: gfx.DEPTH_FORWARD,
+
+        # This lesson draws no geometry,
+        # so disabling Cull has no actual cost.
+        cull: 0,
+    };
+
+    # ------------------------------
+    # 3. Begin Render Pass
+    # ------------------------------
+    #
+    # This is where the Clear is actually performed.
+    #
+    # For a window target:
+    #
+    # renderer_begin_frame()
+    #     ↓
+    # The window Render Pass is already in recording state
+    #     ↓
+    # pass_begin()
+    #     ↓
+    # clear_mid_pass()
+    #
+    # In other words:
+    # clear = 1
+    # clear_color = ...
+    #
+    # Eventually the window's color attachment is cleared to the color we specify.
+    var pass: gfx.Pass =
+        gfx.pass_begin(
+            ?game.renderer,
+            ?pass_desc,
+        );
+
+    # This lesson has no Draw Calls.
+    #
+    # Starting from the next lesson we will actually:
+    # - Draw Sprite
+    # - Draw Mesh
+    # - Draw Triangle
+    # etc.
+
+    # ------------------------------
+    # 4. End Render Pass
+    # ------------------------------
+    gfx.pass_end(?pass);
+
+    # ------------------------------
+    # 5. Submit Frame and Present
+    # ------------------------------
+    #
+    # renderer_end_frame() will:
+    #
+    # - Finish the current command buffer
+    # - Submit GPU work
+    # - Present the swapchain image
+    #
+    # Only then can we actually see this frame.
+    val end_result: Result[bool, gfx.Error] =
+        gfx.renderer_end_frame(
+            ?game.renderer,
+        );
+
+    # Whether End Frame failed.
+    if (is_err[bool, gfx.Error](end_result)) {
+        var error: gfx.Error =
+            unwrap_err[bool, gfx.Error](end_result);
+
+        print.eprintlnf(
+            "Failed to end frame: {}",
+            gfx.error_msg(?error),
+        );
+
+        ret;
+    }
+}
+
+# Called once when the game ends.
+fun on_dnit(ctx: *Context) {
+    val game: *Game = context_user(ctx)::*Game;
+
+    # If Renderer was not initialized successfully,
+    # there are no resources to release.
+    if (!game.ready) {
+        ret;
+    }
+
+    # Renderer owns its own GPU device,
+    # so Renderer is released last.
+    gfx.renderer_dnit(?game.renderer);
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    # Game's own state.
+    var game: Game;
+
+    # ------------------------------
+    # Boom App lifecycle
+    # ------------------------------
+    #
+    # Organized with a consistent on_* naming scheme.
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    # ------------------------------
+    # Initialize Context
+    # ------------------------------
+    var ctx: Context;
+
+    val cfg: Config = Config{
+        width:     1280,
+        height:    720,
+
+        title: "Boom Example 02 - Clear Screen",
+
+        # Game logic is fixed at 60 Hz.
+        fixed_dt: SECOND / 60,
+
+        # Maximum single-frame time.
+        #
+        # Prevents the fixed timestep from entering a spiral of death
+        # while trying to catch up after severe stuttering.
+        max_frame: 250 * MILLISECOND,
+    };
+
+    # If initialization returns false,
+    # it means Boom Context initialization failed.
+    if (!context_init(?ctx, cfg)) {
+        print.eprintln("Context initialization failed");
+        ret 1;
+    }
+
+    # Hand the Game state to Boom Context.
+    #
+    # on_init / on_tick / on_draw / on_dnit
+    # can all retrieve Game through context_user().
+    context_set_user(?ctx, (?game)::ptr);
+
+    # ------------------------------
+    # Run the game main loop
+    # ------------------------------
+    #
+    # Boom is responsible for:
+    #
+    # poll
+    #   ↓
+    # fixed update
+    #   ↓
+    # render
+    #   ↓
+    # next frame
+    #
+    # until the window is closed.
+    val status: i64 = run(?ctx, ?app);
+
+    # ------------------------------
+    # Shut down Context
+    # ------------------------------
+    context_shutdown(?ctx);
+
+    ret status;
+}
+

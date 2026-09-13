@@ -1,0 +1,520 @@
+# Example 04 - Model、View、Projection 与 MVP
+#
+# 本例学习 3D 渲染中非常重要的一组空间变换：
+#
+# 1. Model Space（模型空间）
+#    顶点最开始存储的位置。
+#
+# 2. Model Matrix（模型矩阵）
+#    把模型从模型空间变换到世界空间。
+#
+# 3. World Space（世界空间）
+#    模型经过 Model Matrix 后所在的世界坐标。
+#
+# 4. View Matrix（视图矩阵）
+#    把世界空间转换到 Camera 的观察空间。
+#
+# 5. View Space（观察空间）
+#    从 Camera 的角度看到的 3D 空间。
+#
+# 6. Projection Matrix（投影矩阵）
+#    把观察空间投影到裁剪空间。
+#
+# 7. Clip Space（裁剪空间）
+#    用于进行视锥体裁剪的空间。
+#
+# 8. NDC（Normalized Device Coordinates，标准化设备坐标）
+#    投影和透视除法之后的标准化坐标。
+#
+# 整个过程：
+#
+#    Model Space（模型空间）
+#         ↓
+#    Model Matrix（模型矩阵）
+#         ↓
+#    World Space（世界空间）
+#         ↓
+#    View Matrix（视图矩阵）
+#         ↓
+#    View Space（观察空间）
+#         ↓
+#    Projection Matrix（投影矩阵）
+#         ↓
+#    Clip Space（裁剪空间）
+#         ↓
+#    NDC（标准化设备坐标）
+#         ↓
+#    Screen（屏幕）
+#
+# 这几个矩阵组合起来通常称为：
+#    MVP
+#
+#    Model × View × Projection
+#    模型矩阵 × 视图矩阵 × 投影矩阵
+#
+# 本例不会手动创建这些矩阵，
+# boom 的 Camera 和 Transform 会负责这些变换。
+#
+# 为了让这个例子更加直观：
+#
+#    三角形会绕 Y 轴旋转。
+#
+# 但旋转角度限制在：
+#    -60° ～ +60°
+#
+# 这样可以保持三角形一直大致面向摄像机，
+# 避免第 05 课才正式讲解的 Back-face Culling
+# 干扰这一课对空间变换的观察。
+#
+# 注意：
+#
+# pass_desc.cull 如果设置为 0，
+# 禁用的是 Frustum Culling（视锥体剔除），
+# 不是 Back-face Culling（背面剔除）。
+#
+# 本例的重点仍然是：
+#    Model → View → Projection
+# 以及：
+#    MVP
+
+use std.runtime;
+use std.print;
+
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+
+use std.types.result.Result;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.context.context_shutdown;
+
+use boom.engine.run;
+use boom.app.App;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    # Renderer 负责当前窗口和 GPU 绘制流程。
+    renderer: gfx.Renderer;
+
+    # 三角形 Mesh。
+    mesh: gfx.Mesh;
+
+    # 三角形使用的 Material。
+    material: gfx.Material;
+
+    # 3D Camera。
+    #
+    # Camera 决定我们从什么位置观察世界。
+    camera: gfx.Camera;
+
+    # Transform 保存模型在世界中的位置、旋转和缩放。
+    #
+    # 它对应 Model Transform，
+    # 最终参与 Model Matrix。
+    transform: gm.Transform;
+
+    # 当前旋转角度，单位为弧度。
+    angle: f32;
+
+    # 正面
+    forward: bool;
+
+    # 模型是否已经初始化完成。
+    ready: bool;
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+
+    g.ready = false;
+    g.angle = 0.0;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    # 初始化 Renderer。
+    val rr: Result[bool, gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ctx.window.handle,
+        w,
+        h,
+    );
+
+    if (is_err[bool, gfx.Error](rr)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](rr);
+        print.eprintlnf(
+            "renderer init error: {}",
+            gfx.error_msg(?e),
+        );
+        ret;
+    }
+
+    # GPU Mesh 需要使用 Renderer 所属的 Device。
+    val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+
+    # ============================================================
+    # 创建三角形顶点
+    # ============================================================
+    #
+    # 使用 boom 标准 3D VertexFormat：
+    #    Position(3) + Normal(3) + UV(2)
+    #
+    # 每个顶点 8 个 f32。
+    #
+    # 三个顶点最开始位于：
+    #
+    #    Model Space
+    #
+    # 之后 Transform 会负责把它们变换到：
+    #
+    #    World Space
+    #
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.9, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    # 三角形使用 3 个 Index。
+    #
+    # 这里的绕序：
+    #
+    #    0 → 1 → 2
+    #
+    # 是逆时针。
+    #
+    # 第 05 课会专门学习它为什么会影响
+    # Front Face / Back Face。
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # 创建 Mesh。
+    val mesh_result: Result[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+
+    if (is_err[gfx.Mesh, gfx.Error](mesh_result)) {
+        var e: gfx.Error = unwrap_err[gfx.Mesh, gfx.Error](mesh_result);
+        print.eprintlnf(
+            "mesh error: {}",
+            gfx.error_msg(?e),
+        );
+        ret;
+    }
+
+    g.mesh = unwrap_ok[gfx.Mesh, gfx.Error](mesh_result);
+
+    # 创建 Material。
+    #
+    # 本课还不重点讲 Material，
+    # 这里只给三角形一个简单颜色，方便观察模型。
+    g.material = gfx.material();
+
+    gfx.material_set_color(
+        ?g.material,
+        gm.vec4(
+            0.5,
+            1.0,
+            0.5,
+            1.0,
+        ),
+    );
+
+    # ============================================================
+    # 创建 Perspective Camera
+    # ============================================================
+    #
+    # Camera 位于 Z = 4。
+    #
+    # 它观察原点：
+    #
+    #    Position = (0, 0, 4)
+    #    Target   = (0, 0, 0)
+    #
+    # Camera 会产生 View Matrix。
+    #
+    # Perspective Camera 同时会产生 Projection Matrix。
+    #
+    # 因此：
+    #
+    #    Transform + Camera
+    #
+    # 最终就构成了这一课中的：
+    #
+    #    Model + View + Projection
+    val aspect: f32 = w::f32 / h::f32;
+
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 4.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # 初始使用 Identity Transform。
+    #
+    # 也就是：
+    #
+    #    Position = 0
+    #    Rotation = Identity
+    #    Scale    = 1
+    #
+    # 因此模型最初直接位于世界原点附近。
+    g.transform = gm.transform_identity();
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+
+    if (!g.ready) {
+        ret;
+    }
+
+    # 让三角形在 -60° 到 +60° 之间来回旋转。
+    #
+    # forward = true：
+    #    向正方向旋转。
+    #
+    # forward = false：
+    #    向反方向旋转。
+    if (g.forward) {
+        g.angle = g.angle + 0.02;
+        if (g.angle >= gm.radians(60.0)) {
+            g.forward = false;
+        }
+    }
+    or {
+        g.angle = g.angle - 0.02;
+        if (g.angle <= -gm.radians(60.0)) {
+            g.forward = true;
+        }
+    }
+
+    g.transform.rotation = gm.quat_from_axis_angle(
+        gm.vec3(0.0, 1.0, 0.0),
+        g.angle,
+    );
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # 窗口大小变化后重新计算 Camera Aspect Ratio。
+    #
+    # Aspect Ratio：
+    #
+    #    width / height
+    #
+    # 它会参与 Projection Matrix。
+    g.camera.aspect = w / h;
+
+    # 开始当前 Frame。
+    var opened: bool = false;
+
+    val br: Result[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+        ?opened,
+    );
+
+    if (is_err[bool, gfx.Error](br)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](br);
+        print.eprintlnf(
+            "begin frame error: {}",
+            gfx.error_msg(?e),
+        );
+        ret;
+    }
+
+    if (!opened) {
+        ret;
+    }
+
+    # ============================================================
+    # 创建 3D Scene Pass
+    # ============================================================
+    #
+    # pass_scene() 使用我们的 3D Camera。
+    #
+    # Camera 会参与：
+    #
+    #    View Matrix
+    #    Projection Matrix
+    #
+    # 而 Mesh 的 Transform 会参与：
+    #
+    #    Model Matrix
+    #
+    # 所以这里正是 MVP 在实际渲染流程中的体现。
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(?g.camera);
+
+    # 背景颜色
+    pass_desc.clear = 1;
+    pass_desc.clear_color = gm.vec4(
+        0.05,
+        0.05,
+        0.08,
+        1.0,
+    );
+
+    # ------------------------------------------------------------
+    # 这里只关闭 Frustum Culling。
+    #
+    # 注意：
+    #    pass_desc.cull
+    #
+    # 控制的是：
+    #    Frustum Culling
+    #
+    # 不是：
+    #    Back-face Culling
+    #
+    # 第 05 课会专门学习后者。
+    pass_desc.cull = false;
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # ============================================================
+    # Draw Call
+    # ============================================================
+    #
+    # Mesh 的三个顶点最开始位于 Model Space。
+    #
+    # Transform：
+    #    Model Matrix
+    #
+    # Camera：
+    #    View Matrix + Projection Matrix
+    #
+    # 最终 GPU 会把它们转换到屏幕上的位置。
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform,
+    );
+
+    gfx.pass_end(?pass);
+
+    # 结束 Frame，并 Present 到窗口。
+    val er: Result[bool, gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+
+    if (is_err[bool, gfx.Error](er)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](er);
+        print.eprintlnf(
+            "end frame error: {}",
+            gfx.error_msg(?e),
+        );
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+
+    if (!g.ready) {
+        ret;
+    }
+
+    # Mesh 是 GPU 资源，退出时需要释放。
+    val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    # 最后关闭 Renderer。
+    gfx.renderer_dnit(?g.renderer);
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    # 设置 Boom App 的生命周期回调。
+    var app: App;
+
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    # 创建 Context。
+    var ctx: Context;
+
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "第 04 课：Model、View、Projection 与 MVP",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+    };
+
+    # 如果 context_init() 返回 false，
+    # 说明 Context 初始化失败。
+    if (!context_init(?ctx, cfg)) {
+        print.eprintln("Context 初始化失败");
+        ret 1;
+    }
+
+    # 将 Game 状态交给 Context。
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    # 进入 Boom 游戏循环。
+    run(
+        ?ctx,
+        ?app,
+    );
+
+    # 游戏退出后关闭 Context。
+    context_shutdown(?ctx);
+
+    ret 0;
+}
+

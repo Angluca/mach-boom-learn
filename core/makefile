@@ -1,11 +1,14 @@
 .PHONY: all clean run
 
 MAKE ?= make
+EXE ?=
 ifeq ($(PLATFORM_OS),WINDOWS)
-    MAKE = mingw32-make
+MAKE = mingw32-make
+EXE = .exe
 endif
 
-ARGS ?= -L ../libs
+#ARGS ?= -L ../libs
+ARGS ?=
 MFLAGS = $(ARGS)
 
 #SRC_DIRS := core shader
@@ -23,7 +26,8 @@ all: $(TARGETS)
 #.PHONY: $(TARGETS)
 
 $(TARGETS): %: %.mach
-	mach build . $(MFLAGS) -v --bin $@
+	@rm -rf ./out/bin/$@$(EXE)
+	mach build . $(MFLAGS) -v --bin $@$
 
 RUN_TARGET := $(firstword $(filter-out run,$(MAKECMDGOALS)))
 ifeq ($(RUN_TARGET),)

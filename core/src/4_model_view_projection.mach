@@ -1,0 +1,522 @@
+# Example 04 - Model, View, Projection and MVP
+#
+# This example learns a very important set of space transformations in 3D rendering:
+#
+# 1. Model Space
+#    The position where vertices are initially stored.
+#
+# 2. Model Matrix
+#    Transforms the model from model space to world space.
+#
+# 3. World Space
+#    The world coordinates of the model after the Model Matrix.
+#
+# 4. View Matrix
+#    Transforms world space into the Camera's view space.
+#
+# 5. View Space
+#    The 3D space seen from the Camera's perspective.
+#
+# 6. Projection Matrix
+#    Projects view space into clip space.
+#
+# 7. Clip Space
+#    The space used for frustum culling.
+#
+# 8. NDC (Normalized Device Coordinates)
+#    Normalized coordinates after projection and perspective division.
+#
+# The whole process:
+#
+#    Model Space
+#         ↓
+#    Model Matrix
+#         ↓
+#    World Space
+#         ↓
+#    View Matrix
+#         ↓
+#    View Space
+#         ↓
+#    Projection Matrix
+#         ↓
+#    Clip Space
+#         ↓
+#    NDC
+#         ↓
+#    Screen
+#
+# These matrices combined together are usually called:
+#    MVP
+#
+#    Model × View × Projection
+#
+# This example does not manually create these matrices.
+# boom's Camera and Transform handle these transformations.
+#
+# To make this example more intuitive:
+#    The triangle rotates around the Y axis.
+#
+# But the rotation angle is limited to:
+#    -60° to +60°
+#
+# This keeps the triangle roughly facing the camera,
+# avoiding the Back-face Culling that is formally explained in Lesson 05
+# from interfering with observing the space transformations in this lesson.
+#
+# Note:
+# If pass_desc.cull is set to 0,
+# it disables Frustum Culling,
+# not Back-face Culling.
+#
+# The focus of this example is still:
+#    Model → View → Projection
+# and:
+#    MVP
+
+use std.runtime;
+use std.print;
+
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+
+use std.types.result.Result;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.context.context_shutdown;
+
+use boom.engine.run;
+use boom.app.App;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    # Renderer is responsible for the current window and the GPU drawing process.
+    renderer: gfx.Renderer;
+
+    # The triangle Mesh.
+    mesh: gfx.Mesh;
+
+    # The Material used by the triangle.
+    material: gfx.Material;
+
+    # 3D Camera.
+    #
+    # The Camera determines from what position we observe the world.
+    camera: gfx.Camera;
+
+    # Transform stores the model's position, rotation, and scale in the world.
+    #
+    # It corresponds to the Model Transform,
+    # and ultimately participates in the Model Matrix.
+    transform: gm.Transform;
+
+    # Current rotation angle, in radians.
+    angle: f32;
+
+    # Forward direction.
+    forward: bool;
+
+    # Whether the model has finished initialization.
+    ready: bool;
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+
+    g.ready = false;
+    g.angle = 0.0;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    # Initialize Renderer.
+    val rr: Result[bool, gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ctx.window.handle,
+        w,
+        h,
+    );
+
+    if (is_err[bool, gfx.Error](rr)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](rr);
+        print.eprintlnf(
+            "renderer init error: {}",
+            gfx.error_msg(?e),
+        );
+        ret;
+    }
+
+    # GPU Mesh needs to use the Device owned by the Renderer.
+    val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+
+    # ============================================================
+    # Create triangle vertices
+    # ============================================================
+    #
+    # Use boom standard 3D VertexFormat:
+    #    Position(3) + Normal(3) + UV(2)
+    #
+    # Each vertex has 8 f32 values.
+    #
+    # The three vertices are initially located in:
+    #
+    #    Model Space
+    #
+    # Later Transform will transform them to:
+    #
+    #    World Space
+    #
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.9, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    # The triangle uses 3 Indices.
+    #
+    # The winding order here:
+    #
+    #    0 → 1 → 2
+    #
+    # is counter-clockwise.
+    #
+    # Lesson 05 will specifically study why it affects
+    # Front Face / Back Face.
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # Create Mesh.
+    val mesh_result: Result[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+
+    if (is_err[gfx.Mesh, gfx.Error](mesh_result)) {
+        var e: gfx.Error = unwrap_err[gfx.Mesh, gfx.Error](mesh_result);
+        print.eprintlnf(
+            "mesh error: {}",
+            gfx.error_msg(?e),
+        );
+        ret;
+    }
+
+    g.mesh = unwrap_ok[gfx.Mesh, gfx.Error](mesh_result);
+
+    # Create Material.
+    #
+    # This lesson does not focus on Material yet.
+    # Here we just give the triangle a simple color to make it easier to observe the model.
+    g.material = gfx.material();
+
+    gfx.material_set_color(
+        ?g.material,
+        gm.vec4(
+            0.5,
+            1.0,
+            0.5,
+            1.0,
+        ),
+    );
+
+    # ============================================================
+    # Create Perspective Camera
+    # ============================================================
+    #
+    # The Camera is located at Z = 4.
+    #
+    # It looks at the origin:
+    #
+    #    Position = (0, 0, 4)
+    #    Target   = (0, 0, 0)
+    #
+    # The Camera produces the View Matrix.
+    #
+    # The Perspective Camera also produces the Projection Matrix.
+    #
+    # Therefore:
+    #
+    #    Transform + Camera
+    #
+    # together form this lesson's:
+    #
+    #    Model + View + Projection
+    val aspect: f32 = w::f32 / h::f32;
+
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 4.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # Initially use Identity Transform.
+    #
+    # That is:
+    #
+    #    Position = 0
+    #    Rotation = Identity
+    #    Scale    = 1
+    #
+    # Therefore the model is initially directly near the world origin.
+    g.transform = gm.transform_identity();
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+
+    if (!g.ready) {
+        ret;
+    }
+
+    # Let the triangle rotate back and forth between -60° and +60°.
+    #
+    # forward = true:
+    #    Rotate in the positive direction.
+    #
+    # forward = false:
+    #    Rotate in the negative direction.
+    if (g.forward) {
+        g.angle = g.angle + 0.02;
+        if (g.angle >= gm.radians(60.0)) {
+            g.forward = false;
+        }
+    }
+    or {
+        g.angle = g.angle - 0.02;
+        if (g.angle <= -gm.radians(60.0)) {
+            g.forward = true;
+        }
+    }
+
+    g.transform.rotation = gm.quat_from_axis_angle(
+        gm.vec3(0.0, 1.0, 0.0),
+        g.angle,
+    );
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Recalculate the Camera Aspect Ratio after the window size changes.
+    #
+    # Aspect Ratio:
+    #
+    #    width / height
+    #
+    # It participates in the Projection Matrix.
+    g.camera.aspect = w / h;
+
+    # Begin the current Frame.
+    var opened: bool = false;
+
+    val br: Result[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+        ?opened,
+    );
+
+    if (is_err[bool, gfx.Error](br)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](br);
+        print.eprintlnf(
+            "begin frame error: {}",
+            gfx.error_msg(?e),
+        );
+        ret;
+    }
+
+    if (!opened) {
+        ret;
+    }
+
+    # ============================================================
+    # Create 3D Scene Pass
+    # ============================================================
+    #
+    # pass_scene() uses our 3D Camera.
+    #
+    # The Camera participates in:
+    #
+    #    View Matrix
+    #    Projection Matrix
+    #
+    # And the Mesh's Transform participates in:
+    #
+    #    Model Matrix
+    #
+    # So this is exactly where MVP is reflected in the actual rendering pipeline.
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(?g.camera);
+
+    pass_desc.clear = 1;
+
+    pass_desc.clear_color = gm.vec4(
+        0.05,
+        0.05,
+        0.08,
+        1.0,
+    );
+
+    # ------------------------------------------------------------
+    # Here only Frustum Culling is disabled.
+    #
+    # Note:
+    #
+    #    pass_desc.cull
+    #
+    # controls:
+    #
+    #    Frustum Culling
+    #
+    # not:
+    #
+    #    Back-face Culling
+    #
+    # Lesson 05 will specifically study the latter.
+    pass_desc.cull = false;
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # ============================================================
+    # Draw Call
+    # ============================================================
+    #
+    # The three vertices of the Mesh are initially in Model Space.
+    #
+    # Transform:
+    #
+    #    Model Matrix
+    #
+    # Camera:
+    #
+    #    View Matrix + Projection Matrix
+    #
+    # Finally the GPU transforms them to positions on the screen.
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform,
+    );
+
+    gfx.pass_end(?pass);
+
+    # End Frame and Present to the window.
+    val er: Result[bool, gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+
+    if (is_err[bool, gfx.Error](er)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](er);
+        print.eprintlnf(
+            "end frame error: {}",
+            gfx.error_msg(?e),
+        );
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+
+    if (!g.ready) {
+        ret;
+    }
+
+    # Mesh is a GPU resource, so it needs to be released on exit.
+    val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    # Finally shut down the Renderer.
+    gfx.renderer_dnit(?g.renderer);
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    # Set Boom App lifecycle callbacks.
+    var app: App;
+
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    # Create Context.
+    var ctx: Context;
+
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "Lesson 04: Model, View, Projection and MVP",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+    };
+
+    # If context_init() returns false,
+    # it means Context initialization failed.
+    if (!context_init(?ctx, cfg)) {
+        print.eprintln("Context initialization failed");
+        ret 1;
+    }
+
+    # Hand the Game state to the Context.
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    # Enter the Boom game loop.
+    run(
+        ?ctx,
+        ?app,
+    );
+
+    # Shut down Context after the game exits.
+    context_shutdown(?ctx);
+
+    ret 0;
+}
+

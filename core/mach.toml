@@ -1,7 +1,7 @@
 [project]
 id = "base_window"
 version = "0.1.0"
-src = "src"
+src = "src-cn"
 out = "out"
 #out = "out/{target.name}/{profile.name}"
 
@@ -70,14 +70,6 @@ git = "https://github.com/briar-systems/mach-vk"
 ref = "branch/main"
 
 # ----------------------------------------------
-#[artifact.core]
-#kind = "bin"
-#entry = "main.mach"
-#out = "bin/main"
-#targets = ["*"]
-#link = []
-#need = []
-
 [artifact.1_hello_window]
 kind = "bin"
 entry = "1_hello_window.mach"
@@ -85,3 +77,36 @@ out = "bin/1_hello_window"
 targets = ["*"]
 link = []
 need = []
+
+[artifact.2_clear_screen]
+kind = "bin"
+entry = "2_clear_screen.mach"
+out = "bin/2_clear_screen"
+targets = ["*"]
+link = []
+need = []
+
+[artifact.3_first_triangle]
+kind = "bin"
+entry = "3_first_triangle.mach"
+out = "bin/3_first_triangle"
+targets = ["*"]
+link = []
+need = []
+
+[artifact.4_model_view_projection]
+kind = "bin"
+entry = "4_model_view_projection.mach"
+out = "bin/4_model_view_projection"
+targets = ["*"]
+link = []
+need = []
+
+[artifact.5_winding_order_and_back-face_culling]
+kind = "bin"
+entry = "5_winding_order_and_back-face_culling.mach"
+out = "bin/5_winding_order_and_back-face_culling"
+targets = ["*"]
+link = []
+need = []
+
