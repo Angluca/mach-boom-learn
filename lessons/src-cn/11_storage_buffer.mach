@@ -1,0 +1,885 @@
+# Example 11 - Storage Buffer（存储缓冲）与数组数据
+#
+# 本例学习 Storage Buffer（存储缓冲）。
+#
+# 第 10 课我们学习了：
+#
+# Uniform（统一变量）
+#    少量、与当前 Draw（绘制调用）相关的参数。
+#
+# 例如：
+#
+#    colour
+#    brightness
+#    index
+#
+# Uniform 当前只有有限的空间。
+# boom 的 User Uniform 上限是：
+#
+#    256 bytes
+#
+# 也就是 16 个 Vec4。
+#
+# 当我们需要传给 Shader 一整组数据时，
+# 就不应该把所有数据塞进 Uniform。
+#
+# 这就是 Storage Buffer。
+#
+# ------------------------------------------------------------
+# Storage Buffer（存储缓冲）
+# ------------------------------------------------------------
+#
+# Storage Buffer 可以理解成：
+#
+#    一块 GPU 可以读取的大型数组内存。
+#
+# 本课把它理解成：
+#
+#    Game
+#      ↓
+#    32 个颜色
+#      ↓
+#    Storage Buffer
+#      ↓
+#    Shader
+#
+# Shader 再通过一个 index，
+# 从这个数组中选择需要的颜色。
+#
+# ------------------------------------------------------------
+# Uniform 与 Storage Buffer 的区别
+# ------------------------------------------------------------
+#
+# Uniform：
+#
+#    少量参数
+#    每个 Draw 可以不同
+#    例如：
+#
+#        brightness
+#        colour
+#        index
+#
+# Storage Buffer：
+#
+#    一整组大型数据
+#    整个 Frame（帧）共享
+#    例如：
+#
+#        Light（光源）数组
+#        Bone（骨骼）数组
+#        Particle（粒子）数据
+#        大型颜色表
+#        游戏世界中的对象数据
+#
+# 本例故意把两者一起使用：
+#
+#    Uniform:
+#        告诉 Shader “我要第几个颜色”。
+#
+#    Storage Buffer:
+#        保存真正的颜色数组。
+#
+# 这样可以清楚看到：
+#
+#    小参数 → Uniform
+#    大数组 → Storage Buffer
+#
+# ------------------------------------------------------------
+# 本例效果
+# ------------------------------------------------------------
+#
+# 我们创建 32 个绿色系颜色：
+#
+#    颜色 0
+#    颜色 1
+#    ...
+#    颜色 31
+#
+# 然后绘制 4 个完全相同的三角形。
+#
+# 四个 Draw 使用：
+#
+#    index = 0
+#    index = 8
+#    index = 16
+#    index = 24
+#
+# 所以：
+#
+#    Mesh       相同
+#    Material   相同
+#    Shader     相同
+#    Texture    没有
+#
+# 不同的只有：
+#
+#    Uniform 中的 index
+#
+# 而颜色本身来自：
+#
+#    Storage Buffer
+#
+# ------------------------------------------------------------
+# Shader 数据流
+# ------------------------------------------------------------
+#
+#    32 个颜色
+#        ↓
+#    renderer_storage_write()
+#        ↓
+#    binding 8
+#        ↓
+#    Shader
+#        ↑
+#    binding 4
+#        ↑
+#    当前 Draw 的 index
+#
+# 最终：
+#
+#    palette[index]
+#        ↓
+#    Fragment Shader
+#        ↓
+#    最终颜色
+#
+# 本课暂时不学习：
+#
+#    Point Light（点光源）
+#    Storage Buffer 中的复杂结构
+#    Compute Shader
+#    GPU 写入 Storage Buffer
+#
+# 这些内容后面再逐步加入。
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+use std.types.size.usize;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+#[embed("{artifact.shader-lesson11_vert.out}")]
+val LESSON11_VERT_SPV: [_]u8;
+
+#[embed("{artifact.shader-lesson11_frag.out}")]
+val LESSON11_FRAG_SPV: [_]u8;
+
+# Uniform 参数。
+#
+# binding 4 使用这个结构。
+#
+# control.x：
+#    当前 Draw 要读取的颜色索引。
+rec Params {
+    control: gm.Vec4;
+}
+
+rec Game {
+    # Renderer 管理 GPU、Swapchain 和 Frame。
+    renderer: gfx.Renderer;
+
+    # 四个三角形共用同一个 Mesh。
+    mesh: gfx.Mesh;
+
+    # 四个 Draw 共用同一个 Material。
+    material: gfx.Material;
+
+    # 四个 Draw 共用同一个 Shader。
+    shader: gfx.Shader;
+
+    # 3D Camera。
+    camera: gfx.Camera;
+
+    # 四个三角形各自的位置。
+    transform_0: gm.Transform;
+    transform_1: gm.Transform;
+    transform_2: gm.Transform;
+    transform_3: gm.Transform;
+
+    # 每个 Draw 自己的 Uniform。
+    params_0: Params;
+    params_1: Params;
+    params_2: Params;
+    params_3: Params;
+
+    # Storage Buffer 中的颜色数组。
+    #
+    # 32 个 Vec4：
+    #
+    #    32 × 16 bytes = 512 bytes
+    #
+    # 已经超过 User Uniform 的 256 bytes，
+    # 所以这里适合使用 Storage Buffer。
+    palette: [32]gm.Vec4;
+
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer 关闭失败：{}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    # 初始化 Renderer。
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer 初始化失败：{}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # GPU 资源使用 Renderer 所属的 Device。
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # 标准 3D 顶点布局：
+    #
+    # Position（位置）3
+    # Normal（法线）3
+    # UV / TexCoord（纹理坐标）2
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -0.65, -0.55, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         0.65, -0.55, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.00,  0.65, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # 创建 Mesh。
+    #
+    # 数组首元素本身就是对应的数据指针，
+    # 不需要额外的 :~ 类型转换。
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh 创建失败：{}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # ============================================================
+    # 创建 Material
+    # ============================================================
+    #
+    # Shader 会直接使用 Storage Buffer 中的颜色，
+    # 所以 Material 使用白色，
+    # 不改变 Storage Buffer 提供的颜色。
+    g.material = gfx.material();
+
+    gfx.material_set_color(
+        ?g.material,
+        gm.vec4(1.0, 1.0, 1.0, 1.0),
+    );
+
+    # ============================================================
+    # 创建自定义 Shader
+    # ============================================================
+    val shader_result: err[gfx.Error] = gfx.shader(
+        ?g.shader,
+        ?LESSON11_VERT_SPV[0],
+        $length_of(LESSON11_VERT_SPV),
+        ?LESSON11_FRAG_SPV[0],
+        $length_of(LESSON11_FRAG_SPV),
+    );
+    if (sel shader_result.err) {
+        print.eprintlnf(
+            "Shader 创建失败：{}",
+            gfx.error_message(shader_result.err),
+        );
+        gfx.mesh_delete(
+            d,
+            ?g.mesh,
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ============================================================
+    # 创建颜色调色板
+    # ============================================================
+    #
+    # Storage Buffer 中保存 32 个颜色。
+    #
+    # 本教程默认使用绿色三角形，
+    # 所以这里让整个 Palette 保持绿色系。
+    #
+    # 每个颜色都拥有：
+    #
+    #    R
+    #    G
+    #    B
+    #    A
+    #
+    # 例如：
+    #
+    #    (0.5, 1.0, 0.5, 1.0)
+    #
+    # 就是本教程默认的绿色。
+    var i: usize = 0;
+    for (i < 32) {
+        val t: f32 = i::f32 / 31.0;
+        val green: f32 = 0.45 + t * 0.55;
+
+        g.palette[i] = gm.vec4(
+            0.15 + t * 0.35,
+            green,
+            0.15 + t * 0.35,
+            1.0,
+        );
+
+        i = i + 1;
+    }
+
+    # ============================================================
+    # 提前为 Storage Buffer Reserve 空间
+    # ============================================================
+    #
+    # Renderer 会让 Storage Buffer 自动增长，
+    # 但这里提前 Reserve 可以：
+    #
+    #    1. 在初始化阶段完成容量准备。
+    #    2. 避免第一帧第一次写入时才扩容。
+    #    3. 确保 Shader 声明的数组大小不会超过 Buffer Capacity。
+    #
+    # Shader 中声明：
+    #
+    #    [32]f32x4
+    #
+    # 所以至少需要：
+    #
+    #    32 × sizeof(Vec4)
+    #
+    val palette_bytes: usize =
+        32 * $size_of(gm.Vec4);
+
+    val reserved: err[gfx.Error] =
+        gfx.renderer_storage_reserve(
+            ?g.renderer,
+            palette_bytes,
+        );
+    if (sel reserved.err) {
+        print.eprintlnf(
+            "Storage Buffer Reserve 失败：{}",
+            gfx.error_message(reserved.err),
+        );
+        gfx.shader_delete(
+            ?g.shader,
+            d,
+        );
+        gfx.mesh_delete(
+            d,
+            ?g.mesh,
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ============================================================
+    # 创建 Camera
+    # ============================================================
+    #
+    # Camera 提供：
+    #
+    #    View Matrix（视图矩阵）
+    #    Projection Matrix（投影矩阵）
+    val aspect: f32 = w::f32 / h::f32;
+
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 6.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # ============================================================
+    # 四个三角形的位置
+    # ============================================================
+    #
+    # 四个三角形使用同一个 Mesh。
+    #
+    # 它们只是在 World Space（世界空间）中的位置不同。
+    g.transform_0 = gm.transform_identity();
+    g.transform_0.position = gm.vec3(
+        -1.6,
+        0.9,
+        0.0,
+    );
+
+    g.transform_1 = gm.transform_identity();
+    g.transform_1.position = gm.vec3(
+        1.6,
+        0.9,
+        0.0,
+    );
+
+    g.transform_2 = gm.transform_identity();
+    g.transform_2.position = gm.vec3(
+        -1.6,
+        -0.9,
+        0.0,
+    );
+
+    g.transform_3 = gm.transform_identity();
+    g.transform_3.position = gm.vec3(
+        1.6,
+        -0.9,
+        0.0,
+    );
+
+    # ============================================================
+    # 四个 Draw 的 Uniform
+    # ============================================================
+    #
+    # Uniform 不保存颜色本身。
+    #
+    # 它只保存：
+    #
+    #    “我要从 Storage Buffer 中读取哪一个颜色？”
+    #
+    # 四个 Draw 分别读取：
+    #
+    #    0
+    #    8
+    #    16
+    #    24
+    g.params_0.control = gm.vec4(
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    g.params_1.control = gm.vec4(
+        8.0,
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    g.params_2.control = gm.vec4(
+        16.0,
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    g.params_3.control = gm.vec4(
+        24.0,
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # 本课暂时不让三角形运动。
+    #
+    # 保持所有 Draw 的几何和 Camera 条件一致，
+    # 只观察 Uniform Index 和 Storage Buffer 的关系。
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Window 大小变化后更新 Camera 的宽高比。
+    g.camera.aspect = w / h;
+
+    # 开始 Frame。
+    val br: res[bool, gfx.Error] =
+        gfx.renderer_begin_frame(
+            ?g.renderer,
+        );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame 开始失败：{}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # ============================================================
+    # 写入本帧的 Storage Buffer
+    # ============================================================
+    #
+    # 注意：
+    #
+    # Storage Buffer 是 Frame（帧）级共享数据，
+    # 必须在 renderer_begin_frame() 之后写入。
+    #
+    # 与 Uniform 不同：
+    #
+    # Uniform：
+    #    每次 Draw 可以设置一份。
+    #
+    # Storage Buffer：
+    #    整个 Frame 共用一份。
+    #
+    # 所以这里只写一次。
+    #
+    # :~*u8 的原因：
+    #
+    # renderer_storage_write() 接收的是“字节数据指针”。
+    # 这里把 Vec4 数组的内存按原始 u8 数据块交给它，
+    # 不改变里面的数值。
+    val palette_bytes: usize = 32 * $size_of(gm.Vec4);
+    val wrote: err[gfx.Error] =
+        gfx.renderer_storage_write(
+            ?g.renderer,
+            (?g.palette[0]):~*u8,
+            palette_bytes,
+        );
+    if (sel wrote.err) {
+        print.eprintlnf(
+            "Storage Buffer 写入失败：{}",
+            gfx.error_message(wrote.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # Scene Pass。
+    var pass_desc: gfx.PassDesc =
+        gfx.pass_scene(?g.camera);
+
+    var pass: gfx.Pass =
+        gfx.pass_begin(
+            ?g.renderer,
+            ?pass_desc,
+        );
+
+    # ============================================================
+    # Draw 0
+    # ============================================================
+    #
+    # Uniform：
+    #    index = 0
+    #
+    # Storage Buffer：
+    #    保存全部 32 个颜色。
+    val user_0: err[gfx.Error] =
+        gfx.pass_set_user(
+            ?pass,
+            (?g.params_0):~*u8,
+            $size_of(Params),
+        );
+    if (sel user_0.err) {
+        print.eprintln(
+            "Draw 0 的 Uniform 提交失败",
+        );
+        gfx.pass_end(?pass);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    gfx.pass_draw_shaded(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_0,
+        ?g.shader,
+    );
+
+    # Draw 1：
+    # 只改变 Uniform 中的 index。
+    val user_1: err[gfx.Error] =
+        gfx.pass_set_user(
+            ?pass,
+            (?g.params_1):~*u8,
+            $size_of(Params),
+        );
+    if (sel user_1.err) {
+        print.eprintln(
+            "Draw 1 的 Uniform 提交失败",
+        );
+        gfx.pass_end(?pass);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    gfx.pass_draw_shaded(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_1,
+        ?g.shader,
+    );
+
+    # Draw 2。
+    val user_2: err[gfx.Error] =
+        gfx.pass_set_user(
+            ?pass,
+            (?g.params_2):~*u8,
+            $size_of(Params),
+        );
+    if (sel user_2.err) {
+        print.eprintln(
+            "Draw 2 的 Uniform 提交失败",
+        );
+        gfx.pass_end(?pass);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    gfx.pass_draw_shaded(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_2,
+        ?g.shader,
+    );
+
+    # Draw 3。
+    val user_3: err[gfx.Error] =
+        gfx.pass_set_user(
+            ?pass,
+            (?g.params_3):~*u8,
+            $size_of(Params),
+        );
+    if (sel user_3.err) {
+        print.eprintln(
+            "Draw 3 的 Uniform 提交失败",
+        );
+        gfx.pass_end(?pass);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    gfx.pass_draw_shaded(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_3,
+        ?g.shader,
+    );
+
+    gfx.pass_end(?pass);
+
+    # 提交并 Present（呈现）当前 Frame。
+    val er: err[gfx.Error] =
+        gfx.renderer_end_frame(
+            ?g.renderer,
+        );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame 结束失败：{}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+
+    if (gfx.renderer_refused(?g.renderer) != 0) {
+        print.eprintln(
+            "警告：有 Uniform Block 被拒绝",
+        );
+    }
+
+    if (gfx.renderer_dropped(?g.renderer) != 0) {
+        print.eprintln(
+            "警告：有 Draw Call 被 Renderer 丢弃",
+        );
+    }
+
+    if (gfx.renderer_storage_refused(?g.renderer) != 0) {
+        print.eprintln(
+            "警告：有 Storage Buffer 写入被拒绝",
+        );
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game =
+        context_user(ctx)::*Game;
+
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device =
+        gfx.renderer_device(
+            ?g.renderer,
+        );
+
+    # Shader 是 GPU 资源。
+    gfx.shader_delete(
+        ?g.shader,
+        d,
+    );
+
+    # Mesh 是 GPU 资源。
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    # 设置 App 生命周期回调。
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "第 11 课：Storage Buffer",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    # 创建 Context。
+    val started: err[ContextError] =
+        context_init(
+            ?ctx,
+            cfg,
+        );
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context 初始化失败：{}",
+            context_error_message(
+                started.err,
+            ),
+        );
+        ret 1;
+    }
+
+    # 把 Game 状态交给 Context。
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    # 进入 Boom 游戏循环。
+    val ran: res[i64, EngineError] =
+        run(
+            ?ctx,
+            ?app,
+        );
+
+    # 关闭 Context。
+    val closed: err[ContextError] =
+        context_shutdown(
+            ?ctx,
+        );
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context 关闭失败：{}",
+            context_error_message(
+                closed.err,
+            ),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "游戏循环失败：{}",
+            engine_error_message(
+                ran.err,
+            ),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

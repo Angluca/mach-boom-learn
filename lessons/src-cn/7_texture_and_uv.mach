@@ -1,0 +1,539 @@
+# Example 07 - Texture 与 UV
+#
+# 本例学习两个重要的 3D 概念：
+#
+# 1. Texture（纹理）
+#    纹理是一张可以映射到模型表面的 2D 图像。
+#
+#    它可以提供：
+#    颜色、图案、细节等表面信息。
+#
+# 2. UV / TexCoord（纹理坐标）
+#    UV 用来告诉 GPU：
+#
+#    “模型表面的这个位置，
+#     应该从 Texture 的什么位置取颜色？”
+#
+#    U 通常表示水平方向。
+#    V 通常表示垂直方向。
+#
+#    最常见的范围是：
+#
+#    U = 0.0 ~ 1.0
+#    V = 0.0 ~ 1.0
+#
+# 本例不读取外部图片，
+# 而是在程序中直接创建一个 4×4 的棋盘纹理。
+#
+# 这样可以避免图片路径、资源文件等额外问题，
+# 把注意力集中在：
+#
+#    Vertex（顶点）
+#       ↓
+#    UV（纹理坐标）
+#       ↓
+#    Texture（纹理）
+#       ↓
+#    Texture Sampling（纹理采样）
+#       ↓
+#    最终表面颜色
+#
+# 本例继续使用上一课的 Material（材质）。
+#
+# Material 的 Base Color（基础颜色）
+# 会与采样得到的 Texture 颜色相乘。
+#
+# 所以可以把它理解成：
+#
+#    Geometry（几何体）
+#        +
+#    Transform（变换）
+#        +
+#    Material（材质）
+#        +
+#    Texture（纹理）
+#        ↓
+#    最终表面
+#
+# 本例使用：
+#
+#    TextureFilter.nearest{}
+#
+# 即 Nearest Filtering（最近邻过滤）。
+#
+# 它会选择最接近的 Texel（纹理像素），
+# 不会把相邻像素平滑混合，
+# 因此棋盘格会比较清楚。
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    # Renderer 管理 GPU、Swapchain（交换链）和 Frame（帧）。
+    renderer: gfx.Renderer;
+
+    # 三角形的几何数据。
+    mesh: gfx.Mesh;
+
+    # 独立的 GPU Texture（纹理）资源。
+    texture: gfx.Texture;
+
+    # Material 保存 Base Color 和 Texture 绑定。
+    material: gfx.Material;
+
+    # 3D Camera。
+    camera: gfx.Camera;
+
+    # 模型在世界中的位置、旋转和缩放。
+    transform: gm.Transform;
+
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer 关闭失败：{}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    # 初始化 Renderer。
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer 初始化失败：{}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # GPU 资源都需要使用 Renderer 所属的 Device。
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # 标准 3D 顶点布局：
+    #
+    # Position（位置）3
+    # Normal（法线）3
+    # UV / TexCoord（纹理坐标）2
+    #
+    # 每个 Vertex（顶点）共 8 个 f32。
+    #
+    # 这一课最重要的新内容就是最后两个 UV。
+    #
+    #    (0.0, 0.0) → Texture 左下角
+    #    (1.0, 0.0) → Texture 右下角
+    #    (0.5, 1.0) → Texture 顶部中央
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -1.0, -0.8, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         1.0, -0.8, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.8, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    # 三角形使用 3 个 Index（索引）。
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # 创建 Mesh。
+    #
+    # ?vertices[0] 本身就是顶点数据指针。
+    # ?indices[0] 本身就是 *u32。
+    # 不需要额外的 :~ 类型转换。
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh 创建失败：{}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # ============================================================
+    # 创建 4×4 棋盘 Texture
+    # ============================================================
+    #
+    # Texture 使用 RGBA8：
+    #
+    #    R G B A
+    #
+    # 每个 Texel（纹理像素）占 4 个 u8。
+    #
+    # 4 × 4 一共 16 个 Texel，
+    # 所以需要：
+    #
+    #    16 × 4 = 64 个 u8
+    #
+    # 白色：
+    #
+    #    255, 255, 255, 255
+    #
+    # 深灰色：
+    #
+    #    40, 40, 40, 255
+    #
+    # 最后再经过绿色 Material Base Color，
+    # 会得到绿色和暗绿色的棋盘效果。
+    var pixels: [64]u8 = [64]u8{
+        # Row 0
+        255, 255, 255, 255,   40, 40, 40, 255,
+         40, 40, 40, 255,     255, 255, 255, 255,
+
+        # Row 1
+         40, 40, 40, 255,     255, 255, 255, 255,
+        255, 255, 255, 255,   40, 40, 40, 255,
+
+        # Row 2
+        255, 255, 255, 255,   40, 40, 40, 255,
+         40, 40, 40, 255,     255, 255, 255, 255,
+
+        # Row 3
+         40, 40, 40, 255,     255, 255, 255, 255,
+        255, 255, 255, 255,   40, 40, 40, 255,
+    };
+
+    # texture() 会把 RGBA8 像素上传到 GPU。
+    #
+    # ColorSpace.srgb{}
+    # 表示这些数据属于 sRGB（标准显示颜色空间）。
+    val texture_result: res[gfx.Texture, gfx.Error] = gfx.texture(
+        d,
+        ?pixels[0],
+        4,
+        4,
+        gfx.ColorSpace.srgb{},
+    );
+    if (sel texture_result.err) {
+        print.eprintlnf(
+            "Texture 创建失败：{}",
+            gfx.error_message(texture_result.err),
+        );
+        gfx.mesh_delete(d, ?g.mesh);
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.texture = texture_result.ok;
+
+    # ============================================================
+    # 创建 Material 并绑定 Texture
+    # ============================================================
+    #
+    # Base Color（基础颜色）使用教程默认绿色：
+    #
+    #    (0.5, 1.0, 0.5, 1.0)
+    #
+    # Alpha = 1.0 表示完全不透明。
+    g.material = gfx.material();
+
+    gfx.material_set_color(
+        ?g.material,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    # 给 Material 添加第一张纹理。
+    #
+    # 当前内置 Mesh Pipeline 会采样 Material 的第一张 Texture。
+    #
+    # "albedo" 是这个绑定的名称。
+    # 它主要用于 Material 自己管理和后续自定义 Shader 查找，
+    # 当前内置 Pipeline 实际使用的是第一张纹理。
+    #
+    # TextureFilter.nearest{}：
+    #    Nearest Filtering（最近邻过滤）
+    #
+    # 不会对相邻 Texel 进行平滑混合。
+    val added: err[gfx.MaterialError] = gfx.material_add_texture_filtered(
+        ?g.material,
+        "albedo",
+        ?g.texture,
+        gfx.TextureFilter.nearest{},
+    );
+    if (sel added.err) {
+        print.eprintlnf(
+            "Material 纹理绑定失败：{}",
+            gfx.material_error_message(added.err),
+        );
+        gfx.texture_delete(d, ?g.texture);
+        gfx.mesh_delete(d, ?g.mesh);
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ============================================================
+    # 创建 Perspective Camera
+    # ============================================================
+    #
+    # Perspective Projection（透视投影）：
+    # 越远的物体看起来越小。
+    #
+    # Camera 会提供：
+    #
+    #    View Matrix（视图矩阵）
+    #    Projection Matrix（投影矩阵）
+    val aspect: f32 = w::f32 / h::f32;
+
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 4.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # 模型位于世界原点。
+    g.transform = gm.transform_identity();
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # 本课暂时不旋转模型。
+    #
+    # 保持模型静止，可以更清楚地观察：
+    #
+    #    UV → Texture
+    #
+    # 的映射关系。
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Window 大小发生变化后更新 Aspect Ratio（宽高比）。
+    g.camera.aspect = w / h;
+
+    # 开始当前 Frame。
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame 开始失败：{}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Scene Pass（场景通道）负责 3D 绘制。
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # Draw Call（绘制调用）。
+    #
+    # Mesh：
+    #    提供顶点、Index 和 UV。
+    #
+    # Material：
+    #    提供绿色 Base Color 和 Texture。
+    #
+    # Transform：
+    #    决定模型在 World Space（世界空间）中的位置。
+    #
+    # Renderer 会通过 UV 从 Texture 中采样颜色。
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform,
+    );
+
+    gfx.pass_end(?pass);
+
+    # 提交当前 Frame，并 Present（呈现）到窗口。
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame 结束失败：{}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # Texture 是 GPU 资源。
+    # Renderer 关闭之前必须释放。
+    gfx.texture_delete(
+        d,
+        ?g.texture,
+    );
+
+    # Mesh 同样是 GPU 资源。
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    # 设置 App 生命周期回调。
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "第 07 课：Texture 与 UV",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    # 创建 Context。
+    val started: err[ContextError] = context_init(
+        ?ctx,
+        cfg,
+    );
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context 初始化失败：{}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    # 把 Game 状态交给 Context。
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    # 进入 Boom 游戏循环。
+    val ran: res[i64, EngineError] = run(
+        ?ctx,
+        ?app,
+    );
+
+    # 关闭 Context。
+    val closed: err[ContextError] = context_shutdown(
+        ?ctx,
+    );
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context 关闭失败：{}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "游戏循环失败：{}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

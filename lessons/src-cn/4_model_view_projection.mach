@@ -1,0 +1,388 @@
+# Example 04 - Model、View、Projection 与 MVP
+#
+# 本例学习 3D 渲染中的几个重要空间和矩阵：
+#
+# Model Space（模型空间）
+#    顶点最开始存储的位置。
+#
+# Model Matrix（模型矩阵）
+#    把模型从 Model Space 变换到 World Space。
+#
+# World Space（世界空间）
+#    模型在游戏世界中的实际坐标空间。
+#
+# View Matrix（视图矩阵）
+#    把 World Space 转换到 Camera 的观察空间。
+#
+# View Space（观察空间）
+#    从 Camera 角度看到的 3D 空间。
+#
+# Projection Matrix（投影矩阵）
+#    把 View Space 投影到 Clip Space。
+#
+# Clip Space（裁剪空间）
+#    用于后续裁剪和透视处理的空间。
+#
+# NDC（Normalized Device Coordinates，标准化设备坐标）
+#    投影后的标准化坐标，之后会映射到屏幕。
+#
+# 整个过程可以理解为：
+#
+#    Model Space（模型空间）
+#         ↓
+#    Model Matrix（模型矩阵）
+#         ↓
+#    World Space（世界空间）
+#         ↓
+#    View Matrix（视图矩阵）
+#         ↓
+#    View Space（观察空间）
+#         ↓
+#    Projection Matrix（投影矩阵）
+#         ↓
+#    Clip Space（裁剪空间）
+#         ↓
+#    NDC（标准化设备坐标）
+#         ↓
+#    Screen（屏幕）
+#
+# 这几个矩阵通常统称为 MVP（Model-View-Projection）。
+#
+# 在当前 boom 中，实际计算顺序是：
+#
+#    View-Projection = Projection × View
+#    MVP             = View-Projection × Model
+#
+# 也就是：
+#
+#    MVP = Projection × View × Model
+#
+# 本例让三角形绕 Y 轴在 -60° 到 +60° 之间往返旋转，
+# 这样可以观察 Model Transform 如何影响最终屏幕上的模型。
+#
+# 这里暂时不让模型转到完全背面，
+# 避免 Back-face Culling（背面剔除）干扰本课。
+# Back-face Culling 会在第 05 课专门学习。
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    renderer: gfx.Renderer;
+    mesh: gfx.Mesh;
+    material: gfx.Material;
+    camera: gfx.Camera;
+    transform: gm.Transform;
+    angle: f32;
+    forward: bool;
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer 关闭失败：{}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+    g.angle = 0.0;
+    g.forward = true;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer 初始化失败：{}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # 标准 3D 顶点布局：
+    #
+    # Position（位置）3 个 f32
+    # Normal（法线）3 个 f32
+    # UV / TexCoord（纹理坐标）2 个 f32
+    #
+    # 每个 Vertex（顶点）共 8 个 f32。
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.9, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh 创建失败：{}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # 使用统一的浅绿色作为三角形颜色。
+    g.material = gfx.material();
+    gfx.material_set_color(
+        ?g.material,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    # 创建 Perspective Camera（透视摄像机）。
+    #
+    # Camera 会提供 View Matrix 和 Projection Matrix。
+    val aspect: f32 = w::f32 / h::f32;
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 4.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # Transform（变换）控制模型的 Position、Rotation 和 Scale。
+    g.transform = gm.transform_identity();
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # 让三角形在 -60° 到 +60° 之间往返旋转。
+    #
+    # 这里使用显式的方向变量，
+    # 不用 sinf() 把当前位置重新映射成角度，
+    # 这样旋转逻辑更容易理解。
+    if (g.forward) {
+        g.angle = g.angle + 0.02;
+        if (g.angle >= gm.radians(60.0)) {
+            g.angle = gm.radians(60.0);
+            g.forward = false;
+        }
+    }
+    or {
+        g.angle = g.angle - 0.02;
+        if (g.angle <= -gm.radians(60.0)) {
+            g.angle = -gm.radians(60.0);
+            g.forward = true;
+        }
+    }
+
+    # 绕 Y 轴旋转。
+    #
+    # 这会改变 Model Matrix，
+    # 从而改变模型在 World Space 中的位置方向。
+    g.transform.rotation = gm.quat_from_axis_angle(
+        gm.vec3(0.0, 1.0, 0.0),
+        g.angle,
+    );
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Aspect Ratio（宽高比）参与 Projection Matrix。
+    g.camera.aspect = w / h;
+
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame 开始失败：{}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Scene Pass（场景通道）使用 3D Camera。
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # Draw Call（绘制调用）：
+    #
+    # Mesh 从 Model Space 开始，
+    # 经过 Model、View、Projection 三组变换，
+    # 最终进入屏幕。
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform,
+    );
+
+    gfx.pass_end(?pass);
+
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame 结束失败：{}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "第 04 课：Model、View、Projection 与 MVP",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context 初始化失败：{}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    val ran: res[i64, EngineError] = run(?ctx, ?app);
+
+    val closed: err[ContextError] = context_shutdown(?ctx);
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context 关闭失败：{}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "游戏循环失败：{}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

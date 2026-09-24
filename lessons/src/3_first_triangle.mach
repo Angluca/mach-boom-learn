@@ -1,0 +1,332 @@
+# Example 03 - First Triangle
+#
+# This example draws 3D geometry for the first time.
+#
+# Concepts to learn:
+#
+# Vertex
+#    Describes a position on the geometry and the other attributes it carries.
+#
+# Position
+#    The XYZ coordinates of the vertex in model space.
+#
+# Normal
+#    Direction information of the surface, used later by Lighting.
+#
+# UV / TexCoord
+#    Used to tell the Shader how to map to a texture.
+#
+# Vertex Format
+#    Describes which attributes a vertex has and how they are laid out in memory.
+#
+# Index
+#    A number pointing to a Vertex; multiple triangles can reuse the same vertex.
+#
+# Mesh
+#    The vertex and index data in the GPU that is actually used for drawing.
+#
+# Draw Call
+#    Submits a geometry drawing request to the Renderer.
+#
+# This example still only uses one triangle,
+# and the focus is on actually sending data into the 3D Pipeline.
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    renderer: gfx.Renderer;
+    mesh: gfx.Mesh;
+    material: gfx.Material;
+    camera: gfx.Camera;
+    transform: gm.Transform;
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer shutdown failed: {}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer initialization failed: {}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # Standard 3D vertex layout:
+    #
+    # Position(3) + Normal(3) + UV(2)
+    #
+    # Each Vertex has 8 f32 values in total, which is 32 bytes.
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.9, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    # A triangle needs 3 Indices.
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # The current Mesh API requires:
+    #
+    #    vertices: ptr
+    #    indices:  *u32
+    #
+    # The first element of the array already provides the correct pointer type,
+    # so there is no need to manually reinterpret with :~.
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh creation failed: {}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # Material stores surface color and other information.
+    #
+    # This lesson does not go deep into Material yet,
+    # so a uniform light green is used as the triangle's default color.
+    g.material = gfx.material();
+    gfx.material_set_color(
+        ?g.material,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    # Create a Perspective Camera.
+    #
+    # Camera provides:
+    #
+    #    View Matrix
+    #    Projection Matrix
+    val aspect: f32 = w::f32 / h::f32;
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 4.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # Transform controls the model's position, rotation, and scale in the world.
+    g.transform = gm.transform_identity();
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # This lesson does not make the triangle move yet.
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # The window can be resized, so update the Aspect Ratio every frame.
+    g.camera.aspect = w / h;
+
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame begin failed: {}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+    pass_desc.clear = gfx.pass_scene(?g.camera).clear;
+    pass_desc.clear = gfx.pass_scene(?g.camera).clear;
+
+    # Scene Pass uses the Camera's 3D projection.
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # Draw Call:
+    # Submit Mesh, Material, and Transform to the current 3D Pass.
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform,
+    );
+
+    gfx.pass_end(?pass);
+
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame end failed: {}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "Lesson 03: First Triangle",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context initialization failed: {}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    context_set_user(?ctx, (?game)::ptr);
+
+    val ran: res[i64, EngineError] = run(?ctx, ?app);
+
+    val closed: err[ContextError] = context_shutdown(?ctx);
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context shutdown failed: {}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "Game loop failed: {}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

@@ -1,0 +1,575 @@
+# 第 09 课：第一个自定义 Shader
+#
+# 本课第一次正式学习 Shader（着色器）。
+#
+# Shader 是运行在 GPU 上的小程序，
+# 用来决定“顶点怎样变换”和“像素最终是什么颜色”。
+#
+# 本课主要认识两个 Shader Stage（着色器阶段）：
+#
+# 1. Vertex Shader（顶点着色器）
+#    每个 Vertex（顶点）执行一次。
+#
+#    它主要负责：
+#
+#    Position（位置）的变换
+#    Vertex Attribute（顶点属性）的处理
+#    把数据传给后面的 Fragment Shader
+#
+# 2. Fragment Shader（片段着色器）
+#    对最终需要绘制的 Fragment（片段）执行。
+#
+#    它主要决定这个位置最后输出什么颜色。
+#
+# 可以简单理解成：
+#
+#    Vertex
+#      ↓
+#    Vertex Shader
+#      ↓
+#    三角形光栅化
+#      ↓
+#    Fragment Shader
+#      ↓
+#    最终颜色
+#
+# 本课左边使用 boom 默认 Shader。
+#
+# 右边使用我们自己写的 Shader：
+#
+#    Vertex Shader：
+#       继续完成正常的 MVP 位置变换，
+#       同时把 UV 传给 Fragment Shader。
+#
+#    Fragment Shader：
+#       使用 UV 生成颜色渐变，
+#       再与 Material 的 Base Color 和 Texture 相乘。
+#
+# 所以两个三角形：
+#
+#    Mesh        相同
+#    Texture     相同
+#    Material    相同
+#    Transform   不同
+#    Shader      不同
+#
+# 这样可以非常直观地看到：
+#
+#    Shader 决定“表面应该怎样绘制”。
+#
+# ------------------------------------------------------------
+# SPIR-V
+# ------------------------------------------------------------
+#
+# 当前 boom 使用 Vulkan。
+#
+# 我们写的 Shader 不会在游戏运行时直接使用 Mach 源码。
+#
+# 构建流程是：
+#
+#    Mach Shader Source
+#         ↓
+#    SPIR-V（Vulkan 中间表示）
+#         ↓
+#    #[embed]
+#         ↓
+#    游戏程序
+#
+# 所以：
+#
+#    .mach Shader
+#         ↓
+#    编译成 .spv
+#         ↓
+#    gfx.shader()
+#
+# 这一课会同时修改：
+#
+#    1. src-cn/9_first_shader.mach
+#    2. src-cn/shaders/lesson9_vert.mach
+#    3. src-cn/shaders/lesson9_frag.mach
+#    4. mach.toml
+#
+# ------------------------------------------------------------
+# 注意
+# ------------------------------------------------------------
+#
+# Shader 使用的 Vertex Input（顶点输入）必须和 Mesh 的
+# VertexFormat（顶点格式）匹配。
+#
+# 本课仍然使用：
+#
+#    Position(3)
+#    Normal(3)
+#    UV(2)
+#
+# 也就是第 3～8 课一直使用的标准 3D VertexFormat。
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+# ============================================================
+# 嵌入两个 Shader 编译产物
+# ============================================================
+#
+# mach.toml 会先把：
+#
+#    shaders/lesson9_vert.mach
+#    shaders/lesson9_frag.mach
+#
+# 编译成 SPIR-V。
+#
+# #[embed] 再把产生的 .spv 文件直接嵌入最终程序。
+#
+# 因此运行时不需要再读取 Shader 文件。
+#[embed("{artifact.shader-lesson9_vert.out}")]
+val LESSON9_VERT_SPV: [_]u8;
+
+#[embed("{artifact.shader-lesson9_frag.out}")]
+val LESSON9_FRAG_SPV: [_]u8;
+
+rec Game {
+    # Renderer 管理 GPU、Swapchain 和 Frame。
+    renderer: gfx.Renderer;
+
+    # 两个三角形共用同一个 Mesh。
+    mesh: gfx.Mesh;
+
+    # 同一个 Material 也可以交给两个 Shader 使用。
+    material: gfx.Material;
+
+    # 我们自己创建的 Shader。
+    shader: gfx.Shader;
+
+    # 3D Camera。
+    camera: gfx.Camera;
+
+    # 左边使用 boom 默认 Shader。
+    transform_default: gm.Transform;
+
+    # 右边使用我们自己的 Shader。
+    transform_custom: gm.Transform;
+
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer 关闭失败：{}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    # 初始化 Renderer。
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer 初始化失败：{}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # GPU 资源使用 Renderer 所属的 Device 创建。
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # ============================================================
+    # 创建标准 3D Mesh
+    # ============================================================
+    #
+    # Position（位置）3
+    # Normal（法线）3
+    # UV / TexCoord（纹理坐标）2
+    #
+    # 本课的 Shader 仍然使用这一套 VertexFormat。
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -1.0, -0.8, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         1.0, -0.8, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.8, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh 创建失败：{}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # ============================================================
+    # 创建 Material
+    # ============================================================
+    #
+    # 使用教程默认绿色：
+    #
+    #    (0.5, 1.0, 0.5, 1.0)
+    #
+    # 本课虽然重点学习 Shader，
+    # 但 Material 仍然会把 Base Color 提供给 Shader。
+    g.material = gfx.material();
+
+    gfx.material_set_color(
+        ?g.material,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    # ============================================================
+    # 创建自定义 Shader
+    # ============================================================
+    #
+    # gfx.shader() 接收两个 SPIR-V 模块：
+    #
+    #    Vertex Shader
+    #    Fragment Shader
+    #
+    # Shader 创建时不会立刻建立 Vulkan Pipeline。
+    #
+    # 因为 Pipeline 还需要知道：
+    #
+    #    当前 Render Pass
+    #    当前 VertexFormat
+    #
+    # 这些信息直到真正 Draw 时才确定。
+    val shader_result: err[gfx.Error] = gfx.shader(
+        ?g.shader,
+        ?LESSON9_VERT_SPV[0],
+        $length_of(LESSON9_VERT_SPV),
+        ?LESSON9_FRAG_SPV[0],
+        $length_of(LESSON9_FRAG_SPV),
+    );
+    if (sel shader_result.err) {
+        print.eprintlnf(
+            "Shader 创建失败：{}",
+            gfx.error_message(shader_result.err),
+        );
+        gfx.mesh_delete(
+            d,
+            ?g.mesh,
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ============================================================
+    # 创建 Perspective Camera
+    # ============================================================
+    #
+    # Camera 会提供：
+    #
+    #    View Matrix（视图矩阵）
+    #    Projection Matrix（投影矩阵）
+    val aspect: f32 = w::f32 / h::f32;
+
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 6.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # 左边：boom 默认 Shader。
+    g.transform_default = gm.transform_identity();
+    g.transform_default.position = gm.vec3(
+        -1.6,
+        0.0,
+        0.0,
+    );
+
+    # 右边：我们的自定义 Shader。
+    g.transform_custom = gm.transform_identity();
+    g.transform_custom.position = gm.vec3(
+        1.6,
+        0.0,
+        0.0,
+    );
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # 本课先保持模型静止。
+    #
+    # 这样可以把注意力集中在：
+    #
+    #    Built-in Shader
+    #         vs
+    #    Custom Shader
+    #
+    # 而不是同时观察旋转。
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Window 大小发生变化后更新 Camera 宽高比。
+    g.camera.aspect = w / h;
+
+    # 开始 Frame。
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame 开始失败：{}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Scene Pass（场景通道）负责 3D 绘制。
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # ============================================================
+    # 左边：boom 默认 Shader
+    # ============================================================
+    #
+    # 这是前面课程一直使用的：
+    #
+    #    pass_draw_material()
+    #
+    # Boom 内置 Shader 会负责：
+    #
+    #    MVP 变换
+    #    Normal
+    #    Texture Sampling
+    #    默认方向光
+    #    Material Base Color
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_default,
+    );
+
+    # ============================================================
+    # 右边：我们自己的 Shader
+    # ============================================================
+    #
+    # pass_draw_shaded() 与普通 pass_draw_material()
+    # 的最大区别就是最后多了一个 Shader。
+    #
+    # Mesh、Material、Transform 仍然存在，
+    # 但“最终怎么着色”改成由我们的 Shader 决定。
+    gfx.pass_draw_shaded(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_custom,
+        ?g.shader,
+    );
+
+    gfx.pass_end(?pass);
+
+    # 提交当前 Frame。
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame 结束失败：{}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+
+    # 自定义 Shader 第一次绘制时，
+    # boom 可能需要建立对应的 Pipeline。
+    #
+    # 如果某次 Draw 因资源/参数问题被拒绝，
+    # renderer_dropped() 可以帮助发现它，
+    # 而不是让物体悄悄消失。
+    if (gfx.renderer_dropped(?g.renderer) != 0) {
+        print.eprintln("警告：存在被丢弃的 Draw Call");
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # Shader 会创建自己的 Vulkan Pipeline，
+    # 所以它也是需要释放的 GPU 资源。
+    gfx.shader_delete(
+        ?g.shader,
+        d,
+    );
+
+    # Mesh 是 GPU 资源。
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    # 设置 App 生命周期回调。
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "第 09 课：第一个自定义 Shader",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    # 创建 Context。
+    val started: err[ContextError] = context_init(
+        ?ctx,
+        cfg,
+    );
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context 初始化失败：{}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    # 把 Game 状态交给 Context。
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    # 进入 Boom 游戏循环。
+    val ran: res[i64, EngineError] = run(
+        ?ctx,
+        ?app,
+    );
+
+    # 关闭 Context。
+    val closed: err[ContextError] = context_shutdown(
+        ?ctx,
+    );
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context 关闭失败：{}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "游戏循环失败：{}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

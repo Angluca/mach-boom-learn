@@ -1,0 +1,113 @@
+# Lesson 13: Post-processing Vertex Shader
+#
+# The second Pass uses an Overlay Pass.
+#
+# The Quad's Position goes through:
+#
+#     Model Matrix
+#          ↓
+#     View Matrix
+#          ↓
+#     Projection Matrix
+#          ↓
+#     Clip Space
+#
+# UV is passed directly to the Fragment Shader.
+#
+# binding 0:
+#
+#     boom automatically provides MVP + Model Matrix.
+#
+# input 0:
+#
+#     Position
+#
+# input 2:
+#
+#     UV
+
+rec Matrices {
+    mvp_0:   f32x4;
+    mvp_1:   f32x4;
+    mvp_2:   f32x4;
+    mvp_3:   f32x4;
+
+    model_0: f32x4;
+    model_1: f32x4;
+    model_2: f32x4;
+    model_3: f32x4;
+}
+
+#[uniform(0, 0)]
+var matrices: Matrices;
+
+#[input(0)]
+var in_position: f32x3;
+
+#[input(2)]
+var in_uv: f32x2;
+
+#[output(0)]
+var out_uv: f32x2;
+
+#[builtin("position")]
+var position: f32x4;
+
+# A Matrix is stored as four columns.
+#
+# Mach Shader has no built-in Matrix type,
+# so a 4 × 4 Matrix is represented by four f32x4 values.
+fun mul_point(
+    c0: f32x4,
+    c1: f32x4,
+    c2: f32x4,
+    c3: f32x4,
+    p: f32x4
+) f32x4 {
+    ret c0 * f32x4{
+        p[0],
+        p[0],
+        p[0],
+        p[0]
+    } + c1 * f32x4{
+        p[1],
+        p[1],
+        p[1],
+        p[1]
+    } + c2 * f32x4{
+        p[2],
+        p[2],
+        p[2],
+        p[2]
+    } + c3 * f32x4{
+        p[3],
+        p[3],
+        p[3],
+        p[3]
+    };
+}
+
+#[stage("vertex")]
+fun vert_main() {
+    # Quad Position → homogeneous coordinates.
+    val p: f32x4 =
+        f32x4{
+            in_position[0],
+            in_position[1],
+            in_position[2],
+            1.0
+        };
+
+    # Model → View → Projection.
+    position = mul_point(
+        matrices.mvp_0,
+        matrices.mvp_1,
+        matrices.mvp_2,
+        matrices.mvp_3,
+        p
+    );
+
+    # UV continues to be passed to the Fragment Shader.
+    out_uv = in_uv;
+}
+

@@ -1,0 +1,128 @@
+# Lesson 13: Post-processing Fragment Shader
+#
+# First Pass:
+#
+#     3D Scene
+#         ↓
+#     RenderTarget
+#
+# Second Pass:
+#
+#     RenderTarget Texture
+#         ↓
+#     Fragment Shader
+#         ↓
+#     Window
+#
+# The current Shader performs the simplest Post-processing:
+#
+#     amount = 0.0
+#         → original color
+#
+#     amount = 1.0
+#         → fully grayscale
+#
+#     0.0 ~ 1.0
+#         → blend of original and grayscale images
+use tex: shader.texture;
+
+rec Params {
+    amount: f32x4;
+}
+
+# The first Texture of the Material:
+#
+#     binding 1
+#
+# This is the Color Texture of the RenderTarget from Lesson 12/13.
+#[sampler(0, 1)]
+var source: tex.Sampler2D;
+
+# Uniform provided by the Game itself:
+#
+#     binding 4
+#[uniform(0, 4)]
+var params: Params;
+
+# UV passed from the Vertex Shader.
+#[input(0)]
+var in_uv: f32x2;
+
+# The final color of the current Pixel.
+#[output(0)]
+var out_colour: f32x4;
+
+# OpImageSampleImplicitLod:
+#
+# Samples the current color from the Texture according to UV.
+#[op("spirv", "core", "OpImageSampleImplicitLod")]
+fun sample_texture(
+    sampler: tex.Sampler2D,
+    uv: f32x2
+) f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    # --------------------------------------------------------
+    # Read the current color from the RenderTarget Texture
+    # --------------------------------------------------------
+    val texel: f32x4 =
+        sample_texture(
+            source,
+            in_uv
+        );
+
+    # --------------------------------------------------------
+    # Compute grayscale
+    # --------------------------------------------------------
+    #
+    # Use the common perceptual brightness weights:
+    #
+    #     Red   × 0.299
+    #     Green × 0.587
+    #     Blue  × 0.114
+    #
+    # The resulting grayscale is not simply:
+    #
+    #     (R + G + B) / 3
+    #
+    # but is weighted according to how the human eye perceives
+    # the brightness of different colors.
+    val gray: f32 =
+        texel[0] * 0.299
+        + texel[1] * 0.587
+        + texel[2] * 0.114;
+
+    # --------------------------------------------------------
+    # Blend the original image with the grayscale image
+    # --------------------------------------------------------
+    #
+    # amount:
+    #
+    #     0.0 → original image
+    #     1.0 → grayscale
+    val amount: f32 =
+        params.amount[0];
+
+    val red: f32 =
+        texel[0]
+        + (gray - texel[0]) * amount;
+
+    val green: f32 =
+        texel[1]
+        + (gray - texel[1]) * amount;
+
+    val blue: f32 =
+        texel[2]
+        + (gray - texel[2]) * amount;
+
+    # Alpha directly keeps the RenderTarget value.
+    out_colour =
+        f32x4{
+            red,
+            green,
+            blue,
+            texel[3]
+        };
+}
+

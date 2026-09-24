@@ -1,0 +1,64 @@
+# Lesson 10: Fragment Shader
+#
+# The most important new content in this lesson is:
+#
+#    #[uniform(0, 4)]
+#
+# binding 4 is the game's own Uniform Block.
+#
+# CPU side:
+#
+#    Params
+#        ↓
+#    pass_set_user()
+#
+# GPU side:
+#
+#    binding 4
+#        ↓
+#    params
+#
+# Both sides must have the same member order and compatible memory layout.
+
+rec Params {
+    # Triangle color.
+    colour: f32x4;
+
+    # control.x:
+    #    current brightness.
+    #
+    # The other components are not used for now.
+    control: f32x4;
+}
+
+# binding 4:
+# Shader parameters passed in by the game itself.
+#[uniform(0, 4)]
+var params: Params;
+
+# UV passed from the Vertex Shader.
+#
+# This lesson does not use UV for now,
+# here it only keeps the complete vertex interface structure.
+#[input(1)]
+var in_uv: f32x2;
+
+#[output(0)]
+var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    # Read the brightness written by the CPU
+    # through pass_set_user().
+    val brightness: f32 = params.control[0];
+
+    # Compute the final output color using
+    # the Uniform color × the Uniform brightness.
+    out_colour = f32x4{
+        params.colour[0] * brightness,
+        params.colour[1] * brightness,
+        params.colour[2] * brightness,
+        params.colour[3],
+    };
+}
+

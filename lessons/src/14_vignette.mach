@@ -1,0 +1,871 @@
+# Lesson 14: Vignette and Screen Space
+#
+# Lesson 13 was already able to do:
+#
+#     RenderTarget
+#         ↓
+#     Texture
+#         ↓
+#     Fragment Shader
+#         ↓
+#     Window
+#
+# This lesson continues using exactly the same rendering structure.
+#
+# The new content is Screen Space:
+#
+#     A Shader can not only read the Texture's color,
+#     but can also apply effects based on the current Pixel's position.
+#
+# The current Pixel's position is represented by UV / TexCoord:
+#
+#     Top-left:
+#         (0, 0)
+#
+#     Bottom-right:
+#         (1, 1)
+#
+# Screen center:
+#
+#     (0.5, 0.5)
+#
+# The idea behind Vignette:
+#
+#     Compute the distance between the current UV and the screen center.
+#
+#     The closer to the center:
+#         keep the original color
+#
+#     The closer to the edge:
+#         the darker it becomes
+#
+# So this lesson begins to study:
+#
+#     Texture color
+#         +
+#     UV position
+#         ↓
+#     Screen-space effect
+#
+# The first Pass still uses Lesson 12's:
+#
+#     0 → 1 → 2: green front face
+#     0 → 2 → 1: red back face
+#
+# So during rotation it is still:
+#
+#     front → green
+#     back  → red
+#
+# The second Pass then applies Vignette to the entire image.
+
+use std.chrono.duration.SECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_shutdown;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+# ------------------------------------------------------------
+# Shader SPIR-V
+# ------------------------------------------------------------
+#
+# Two Shaders:
+#
+#     Vertex Shader
+#     Fragment Shader
+#
+# Both are compiled by the SPIR-V artifacts in mach.toml.
+#[embed("{artifact.shader-lesson14_vert.out}")]
+val VIGNETTE_VERT_SPV: [_]u8;
+
+#[embed("{artifact.shader-lesson14_frag.out}")]
+val VIGNETTE_FRAG_SPV: [_]u8;
+
+# ------------------------------------------------------------
+# Fragment Shader Uniform
+# ------------------------------------------------------------
+#
+# binding 4:
+#
+# strength.x:
+#
+#     Controls the Vignette strength.
+#
+#     0.0:
+#         no vignette
+#
+#     The larger the value:
+#         the darker the screen edges
+rec Params {
+    strength: f32x4;
+}
+
+rec Game {
+    renderer: gfx.Renderer;
+
+    # First Pass:
+    #
+    #     3D Scene → RenderTarget
+    target: gfx.RenderTarget;
+
+    # The two triangles from Lesson 12.
+    front_mesh: gfx.Mesh;
+    back_mesh: gfx.Mesh;
+
+    # Front green, back red.
+    front_material: gfx.Material;
+    back_material: gfx.Material;
+
+    # Camera for the first Pass.
+    camera: gfx.Camera;
+
+    # Both triangles share the same Transform.
+    transform: gm.Transform;
+
+    # --------------------------------------------------------
+    # Second Pass
+    # --------------------------------------------------------
+    #
+    # A full-screen Quad receives the RenderTarget Texture.
+    post_mesh: gfx.Mesh;
+
+    # The first Texture:
+    #
+    #     RenderTarget Color Texture
+    post_material: gfx.Material;
+
+    # Vignette Shader.
+    post_shader: gfx.Shader;
+
+    # Transform for the full-screen Quad.
+    post_transform: gm.Transform;
+
+    # Fragment Shader parameters.
+    params: Params;
+
+    # Triangle rotation angle.
+    angle: f32;
+
+    # --------------------------------------------------------
+    # Resource state
+    # --------------------------------------------------------
+    renderer_ok: bool;
+    target_ok: bool;
+    front_mesh_ok: bool;
+    back_mesh_ok: bool;
+    post_mesh_ok: bool;
+    shader_ok: bool;
+}
+
+fun on_init(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+    val device: *gfx.Device =
+        gfx.renderer_device(?game.renderer);
+
+    # ------------------------------------------------------------
+    # Create RenderTarget
+    # ------------------------------------------------------------
+    #
+    # Window:
+    #
+    #     960 × 540
+    #
+    # RenderTarget:
+    #
+    #     640 × 360
+    #
+    # The first Pass draws the 3D scene here first.
+    val target_result: res[gfx.RenderTarget, gfx.Error] =
+        gfx.render_target(
+            device,
+            640,
+            360
+        );
+
+    if (sel target_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.target = target_result.ok;
+    game.target_ok = true;
+
+    # ------------------------------------------------------------
+    # Triangle Vertex
+    # ------------------------------------------------------------
+    #
+    # The triangle is deliberately made somewhat larger,
+    # so both the green front face and red back face are easier to observe.
+    #
+    # Position:
+    #     -2.0 ~ +2.0
+    #
+    # Normal:
+    #     0.0, 0.0, 1.0
+    #
+    # UV / TexCoord:
+    #     0.0 ~ 1.0
+    var vertices: [24]f32 = [24]f32{
+        -1.0, -1.0, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+         1.0, -1.0, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+         0.0,  1.0, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0
+    };
+
+    # Front winding order:
+    #
+    #     0 → 1 → 2
+    var front_indices: [3]u32 =
+        [3]u32{0, 1, 2};
+
+    # Back winding order:
+    #
+    #     0 → 2 → 1
+    var back_indices: [3]u32 =
+        [3]u32{0, 2, 1};
+
+    val vertex_format: gfx.VertexFormat =
+        gfx.vertex_format_standard();
+
+    # ------------------------------------------------------------
+    # Front Mesh
+    # ------------------------------------------------------------
+    val front_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?vertices[0],
+            3,
+            ?vertex_format,
+            ?front_indices[0],
+            3
+        );
+
+    if (sel front_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.front_mesh = front_result.ok;
+    game.front_mesh_ok = true;
+
+    # ------------------------------------------------------------
+    # Back Mesh
+    # ------------------------------------------------------------
+    val back_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?vertices[0],
+            3,
+            ?vertex_format,
+            ?back_indices[0],
+            3
+        );
+
+    if (sel back_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.back_mesh = back_result.ok;
+    game.back_mesh_ok = true;
+
+    # ------------------------------------------------------------
+    # Material
+    # ------------------------------------------------------------
+    #
+    # Front:
+    #     green
+    #
+    # Back:
+    #     red
+    game.front_material = gfx.material();
+    game.back_material = gfx.material();
+
+    gfx.material_set_color(
+        ?game.front_material,
+        gm.vec4(
+            0.5,
+            1.0,
+            0.5,
+            1.0
+        )
+    );
+
+    gfx.material_set_color(
+        ?game.back_material,
+        gm.vec4(
+            1.0,
+            0.2,
+            0.2,
+            1.0
+        )
+    );
+
+    # ------------------------------------------------------------
+    # Camera
+    # ------------------------------------------------------------
+    #
+    # Let the triangle occupy as much of the frame as possible,
+    # while still being fully visible.
+    #
+    # Camera:
+    #
+    #     (0, 0, 3)
+    #
+    # Triangle:
+    #
+    #     z = -1
+    #
+    # The distance from Camera to Triangle is about 4.
+    game.camera = gfx.camera_perspective(
+        gm.vec3(
+            0.0,
+            0.0,
+            3.0
+        ),
+        gm.vec3(
+            0.0,
+            0.0,
+            0.0
+        ),
+        gm.radians(60.0),
+        640.0 / 360.0,
+        0.1,
+        100.0
+    );
+
+    game.transform =
+        gm.transform_identity();
+
+    game.transform.position =
+        gm.vec3(
+            0.0,
+            0.0,
+            -1.0
+        );
+
+    # ------------------------------------------------------------
+    # Create full-screen Quad
+    # ------------------------------------------------------------
+    #
+    # The second Pass uses this Quad:
+    #
+    #     RenderTarget Texture
+    #              ↓
+    #             Quad
+    #              ↓
+    #         Vignette Shader
+    #              ↓
+    #            Window
+    var post_vertices: [32]f32 = [32]f32{
+        -0.5, -0.5, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+         0.5, -0.5, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+         0.5,  0.5, 0.0,  0.0, 0.0, 1.0,  1.0, 1.0,
+        -0.5,  0.5, 0.0,  0.0, 0.0, 1.0,  0.0, 1.0
+    };
+
+    var post_indices: [6]u32 = [6]u32{
+        0, 1, 2,
+        0, 2, 3
+    };
+
+    val post_mesh_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?post_vertices[0],
+            4,
+            ?vertex_format,
+            ?post_indices[0],
+            6
+        );
+
+    if (sel post_mesh_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.post_mesh = post_mesh_result.ok;
+    game.post_mesh_ok = true;
+
+    # ------------------------------------------------------------
+    # Post-processing Material
+    # ------------------------------------------------------------
+    #
+    # Get the color Texture from the RenderTarget.
+    val target_texture: *gfx.Texture =
+        gfx.render_target_texture(
+            ?game.target
+        );
+
+    game.post_material =
+        gfx.material();
+
+    # The second Pass scales the 640 × 360 image up to the Window,
+    # so Linear Filtering is used here.
+    val texture_added: err[gfx.MaterialError] =
+        gfx.material_add_texture_filtered(
+            ?game.post_material,
+            "source",
+            target_texture,
+            gfx.TextureFilter.linear{}
+        );
+
+    if (sel texture_added.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # Create Vignette Shader
+    # ------------------------------------------------------------
+    val shader_created: err[gfx.Error] =
+        gfx.shader(
+            ?game.post_shader,
+            ?VIGNETTE_VERT_SPV[0],
+            $length_of(VIGNETTE_VERT_SPV),
+            ?VIGNETTE_FRAG_SPV[0],
+            $length_of(VIGNETTE_FRAG_SPV)
+        );
+
+    if (sel shader_created.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.shader_ok = true;
+
+    # The second Pass is a full-screen 2D Quad:
+    #
+    #     no Back-face Culling needed
+    #     no Depth Test needed
+    gfx.shader_set_state(
+        ?game.post_shader,
+        gfx.pipeline_desc_2d()
+    );
+
+    # ------------------------------------------------------------
+    # Full-screen Quad Transform
+    # ------------------------------------------------------------
+    #
+    # The Quad itself is only 1 × 1.
+    #
+    # In on_draw(), based on the current framebuffer size,
+    # it is scaled up to the entire screen.
+    game.post_transform =
+        gm.transform_identity();
+
+    # Vignette strength.
+    #
+    # 0.7 will be fairly noticeable,
+    # but still allows the triangle's original color to be seen clearly.
+    game.params.strength =
+        gm.vec4(
+            0.7,
+            0.0,
+            0.0,
+            0.0
+        );
+
+    game.angle = 0.0;
+}
+
+fun on_tick(ctx: *Context) {
+    val game: *Game =
+        context_user(ctx):~*Game;
+
+    # ------------------------------------------------------------
+    # Triangle rotation
+    # ------------------------------------------------------------
+    #
+    # Keep Lesson 12's rotation speed:
+    #
+    #     0.02 rad / frame
+    #
+    # A slower speed makes it easier to observe:
+    #
+    #     green front
+    #         ↓
+    #     side
+    #         ↓
+    #     red back
+    game.angle =
+        game.angle + 0.02;
+
+    if (game.angle >= gm.radians(360.0)) {
+        game.angle =
+            game.angle - gm.radians(360.0);
+    }
+
+    game.transform.rotation =
+        gm.quat_from_axis_angle(
+            gm.vec3(
+                0.0,
+                1.0,
+                0.0
+            ),
+            game.angle
+        );
+}
+
+fun on_draw(ctx: *Context) {
+    val game: *Game =
+        context_user(ctx):~*Game;
+
+    # ------------------------------------------------------------
+    # Begin Frame
+    # ------------------------------------------------------------
+    val began: res[bool, gfx.Error] =
+        gfx.renderer_begin_frame(
+            ?game.renderer
+        );
+
+    if (sel began.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!began.ok) {
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # Read the current framebuffer size
+    # ------------------------------------------------------------
+    #
+    # The Post-processing Quad must cover the actual framebuffer.
+    #
+    # renderer_width / renderer_height
+    # are the size the current Renderer is actually drawing to.
+    val width: f32 = gfx.renderer_width( ?game.renderer)::f32;
+    val height: f32 = gfx.renderer_height( ?game.renderer)::f32;
+
+    # Quad center:
+    #
+    #     (width / 2, height / 2)
+    #
+    # Quad size:
+    #
+    #     width × height
+    game.post_transform.position =
+        gm.vec3(
+            width * 0.5,
+            height * 0.5,
+            0.0
+        );
+
+    game.post_transform.scale =
+        gm.vec3(
+            width,
+            height,
+            1.0
+        );
+
+    # ============================================================
+    # Pass 1: 3D Scene → RenderTarget
+    # ============================================================
+    var scene: gfx.PassDesc = gfx.pass_scene(?game.camera);
+
+    # The default target is none:
+    #
+    #     none
+    #       ↓
+    #     default Window / Swapchain
+    #       ↓
+    #     displayed directly on screen
+    #
+    # Specify a RenderTarget:
+    #
+    #     some{?game.target}
+    #       ↓
+    #     game.target
+    #       ↓
+    #     offscreen rendering first
+    scene.target =
+        opt[*gfx.RenderTarget].some{
+            ?game.target
+        };
+
+    var p1: gfx.Pass =
+        gfx.pass_begin(
+            ?game.renderer,
+            ?scene
+        );
+
+    # Front green.
+    gfx.pass_draw_material(
+        ?p1,
+        ?game.front_mesh,
+        ?game.front_material,
+        ?game.transform
+    );
+
+    # Back red.
+    #
+    # The two Meshes have exactly the same position and Transform,
+    # the only change is the Index order.
+    gfx.pass_draw_material(
+        ?p1,
+        ?game.back_mesh,
+        ?game.back_material,
+        ?game.transform
+    );
+
+    gfx.pass_end(?p1);
+
+    # ============================================================
+    # RenderTarget → Texture
+    # ============================================================
+    val target_texture: *gfx.Texture =
+        gfx.render_target_texture(
+            ?game.target
+        );
+
+    # ============================================================
+    # Pass 2: Texture → Vignette Shader → Window
+    # ============================================================
+    var overlay: gfx.PassDesc =
+        gfx.pass_overlay();
+
+    # This is a Quad covering the entire screen,
+    # so the Pass's Frustum Culling does not need to be used.
+    overlay.cull = false;
+
+    var p2: gfx.Pass =
+        gfx.pass_begin(
+            ?game.renderer,
+            ?overlay
+        );
+
+    # ------------------------------------------------------------
+    # binding 4: Vignette parameters
+    # ------------------------------------------------------------
+    #
+    # The Shader will get:
+    #
+    #     Params.strength.x
+    #
+    # to obtain the Vignette strength.
+    val params_ptr: *u8 =
+        (?game.params):~*u8;
+
+    val params_size: usize =
+        16;
+
+    val user_set: err[gfx.Error] =
+        gfx.pass_set_user(
+            ?p2,
+            params_ptr,
+            params_size
+        );
+
+    if (sel user_set.err) {
+        gfx.pass_end(?p2);
+        val ended_after_error: err[gfx.Error] =
+            gfx.renderer_end_frame(
+                ?game.renderer
+            );
+
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # Draw the full-screen Quad with the custom Shader
+    # ------------------------------------------------------------
+    #
+    # Material:
+    #
+    #     first Texture
+    #         ↓
+    #     RenderTarget Color Texture
+    #
+    # Shader:
+    #
+    #     read Texture
+    #         ↓
+    #     compute distance from screen center based on UV
+    #         ↓
+    #     darken edges
+    #         ↓
+    #     output final color
+    gfx.pass_draw_shaded(
+        ?p2,
+        ?game.post_mesh,
+        ?game.post_material,
+        ?game.post_transform,
+        ?game.post_shader
+    );
+
+    gfx.pass_end(?p2);
+
+    # ------------------------------------------------------------
+    # End Frame
+    # ------------------------------------------------------------
+    val ended: err[gfx.Error] =
+        gfx.renderer_end_frame(
+            ?game.renderer
+        );
+
+    if (sel ended.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val game: *Game =
+        context_user(ctx):~*Game;
+
+    if (game.renderer_ok) {
+        val device: *gfx.Device =
+            gfx.renderer_device(
+                ?game.renderer
+            );
+
+        if (game.shader_ok) {
+            gfx.shader_delete(
+                ?game.post_shader,
+                device
+            );
+        }
+
+        if (game.post_mesh_ok) {
+            gfx.mesh_delete(
+                device,
+                ?game.post_mesh
+            );
+        }
+
+        if (game.back_mesh_ok) {
+            gfx.mesh_delete(
+                device,
+                ?game.back_mesh
+            );
+        }
+
+        if (game.front_mesh_ok) {
+            gfx.mesh_delete(
+                device,
+                ?game.front_mesh
+            );
+        }
+
+        if (game.target_ok) {
+            gfx.render_target_delete(
+                device,
+                ?game.target
+            );
+        }
+
+        val renderer_closed: err[gfx.Error] =
+            gfx.renderer_dnit(
+                ?game.renderer
+            );
+
+        if (sel renderer_closed.err) {
+            context_fail(ctx, 1);
+        }
+    }
+
+    game.renderer_ok = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var ctx: Context;
+
+    val cfg: Config = Config{
+        width: 960,
+        height: 540,
+        title: "Lesson 14 - Vignette",
+        fixed_dt: SECOND / 60,
+        max_frame: SECOND / 4,
+        frame_dt: 0,
+        mode: WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] =
+        context_init(
+            ?ctx,
+            cfg
+        );
+
+    if (sel started.err) {
+        ret 1;
+    }
+
+    var game: Game;
+
+    game.renderer_ok = false;
+    game.target_ok = false;
+    game.front_mesh_ok = false;
+    game.back_mesh_ok = false;
+    game.post_mesh_ok = false;
+    game.shader_ok = false;
+
+    # Context itself owns the Window.
+    val renderer_started: err[gfx.Error] =
+        gfx.renderer_init(
+            ?game.renderer,
+            ?ctx.window
+        );
+
+    if (sel renderer_started.err) {
+        context_shutdown(?ctx);
+        ret 1;
+    }
+
+    game.renderer_ok = true;
+
+    context_set_user(
+        ?ctx,
+        ?game
+    );
+
+    var app: App = App{
+        f_init: on_init,
+        f_tick: on_tick,
+        f_draw: on_draw,
+        f_dnit: on_dnit,
+    };
+
+    val ran: res[i64, EngineError] =
+        run(
+            ?ctx,
+            ?app
+        );
+
+    val closed: err[ContextError] =
+        context_shutdown(
+            ?ctx
+        );
+
+    if (sel closed.err) {
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

@@ -1,0 +1,868 @@
+# 第14课：Vignette（晕影）与 Screen Space（屏幕空间）
+#
+# 第13课已经能够：
+#
+#     RenderTarget
+#         ↓
+#     Texture
+#         ↓
+#     Fragment Shader
+#         ↓
+#     Window
+#
+# 这一课继续使用完全相同的渲染结构。
+#
+# 新内容是 Screen Space（屏幕空间）：
+#
+#     Shader 不只可以读取 Texture 的颜色，
+#     还可以根据当前 Pixel（像素）的位置做效果。
+#
+# 当前 Pixel 的位置通过 UV / TexCoord（纹理坐标）表示：
+#
+#     左上角：
+#         (0, 0)
+#
+#     右下角：
+#         (1, 1)
+#
+# 屏幕中心：
+#
+#     (0.5, 0.5)
+#
+# Vignette（晕影）的思路：
+#
+#     计算当前 UV 与屏幕中心的距离。
+#
+#     越接近中心：
+#         保持原颜色
+#
+#     越靠近边缘：
+#         越暗
+#
+# 所以这一课开始学习：
+#
+#     Texture 颜色
+#         +
+#     UV 位置
+#         ↓
+#     屏幕空间效果
+#
+# 第一 Pass 仍然使用第12课的：
+#
+#     0 → 1 → 2：绿色正面
+#     0 → 2 → 1：红色背面
+#
+# 所以旋转时依然：
+#
+#     正面 → 绿色
+#     背面 → 红色
+#
+# 第二 Pass 再把整张画面加上 Vignette。
+
+use std.chrono.duration.SECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_shutdown;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+# ------------------------------------------------------------
+# Shader SPIR-V
+# ------------------------------------------------------------
+#
+# 两个 Shader：
+#
+#     Vertex Shader
+#     Fragment Shader
+#
+# 都由 mach.toml 中的 SPIR-V artifact 编译。
+#[embed("{artifact.shader-lesson14_vert.out}")]
+val VIGNETTE_VERT_SPV: [_]u8;
+
+#[embed("{artifact.shader-lesson14_frag.out}")]
+val VIGNETTE_FRAG_SPV: [_]u8;
+
+# ------------------------------------------------------------
+# Fragment Shader Uniform
+# ------------------------------------------------------------
+#
+# binding 4：
+#
+# strength.x：
+#
+#     控制 Vignette 的强度。
+#
+#     0.0：
+#         不产生晕影
+#
+#     数值越大：
+#         屏幕边缘越暗
+rec Params {
+    strength: f32x4;
+}
+
+rec Game {
+    renderer: gfx.Renderer;
+
+    # 第一 Pass：
+    #
+    #     3D Scene → RenderTarget
+    target: gfx.RenderTarget;
+
+    # 第12课的两个三角形。
+    front_mesh: gfx.Mesh;
+    back_mesh: gfx.Mesh;
+
+    # 正面绿色，背面红色。
+    front_material: gfx.Material;
+    back_material: gfx.Material;
+
+    # 第一 Pass 的 Camera。
+    camera: gfx.Camera;
+
+    # 两个三角形共用同一个 Transform。
+    transform: gm.Transform;
+
+    # --------------------------------------------------------
+    # 第二 Pass
+    # --------------------------------------------------------
+    #
+    # 用一个全屏 Quad 接收 RenderTarget Texture。
+    post_mesh: gfx.Mesh;
+
+    # 第一张 Texture：
+    #
+    #     RenderTarget Color Texture
+    post_material: gfx.Material;
+
+    # Vignette Shader。
+    post_shader: gfx.Shader;
+
+    # 全屏 Quad 的变换。
+    post_transform: gm.Transform;
+
+    # Fragment Shader 参数。
+    params: Params;
+
+    # 三角形旋转角度。
+    angle: f32;
+
+    # --------------------------------------------------------
+    # 资源状态
+    # --------------------------------------------------------
+    renderer_ok: bool;
+    target_ok: bool;
+    front_mesh_ok: bool;
+    back_mesh_ok: bool;
+    post_mesh_ok: bool;
+    shader_ok: bool;
+}
+
+fun on_init(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+    val device: *gfx.Device =
+        gfx.renderer_device(?game.renderer);
+
+    # ------------------------------------------------------------
+    # 创建 RenderTarget
+    # ------------------------------------------------------------
+    #
+    # Window：
+    #
+    #     960 × 540
+    #
+    # RenderTarget：
+    #
+    #     640 × 360
+    #
+    # 第一 Pass 先把 3D 场景画进这里。
+    val target_result: res[gfx.RenderTarget, gfx.Error] =
+        gfx.render_target(
+            device,
+            640,
+            360
+        );
+
+    if (sel target_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.target = target_result.ok;
+    game.target_ok = true;
+
+    # ------------------------------------------------------------
+    # Triangle Vertex
+    # ------------------------------------------------------------
+    #
+    # 三角形故意直接做大一些，
+    # 让正面绿色和背面红色都更容易观察。
+    #
+    # Position（位置）：
+    #     -1.0 ~ +1.0
+    #
+    # Normal（法线）：
+    #     0.0, 0.0, 1.0
+    #
+    # UV / TexCoord（纹理坐标）：
+    #     0.0 ~ 1.0
+    var vertices: [24]f32 = [24]f32{
+        -1.0, -1.0, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+         1.0, -1.0, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+         0.0,  1.0, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0
+    };
+
+    # 正面绕序：
+    #
+    #     0 → 1 → 2
+    var front_indices: [3]u32 =
+        [3]u32{0, 1, 2};
+
+    # 背面绕序：
+    #
+    #     0 → 2 → 1
+    var back_indices: [3]u32 =
+        [3]u32{0, 2, 1};
+
+    val vertex_format: gfx.VertexFormat =
+        gfx.vertex_format_standard();
+
+    # ------------------------------------------------------------
+    # 正面 Mesh
+    # ------------------------------------------------------------
+    val front_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?vertices[0],
+            3,
+            ?vertex_format,
+            ?front_indices[0],
+            3
+        );
+
+    if (sel front_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.front_mesh = front_result.ok;
+    game.front_mesh_ok = true;
+
+    # ------------------------------------------------------------
+    # 背面 Mesh
+    # ------------------------------------------------------------
+    val back_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?vertices[0],
+            3,
+            ?vertex_format,
+            ?back_indices[0],
+            3
+        );
+
+    if (sel back_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.back_mesh = back_result.ok;
+    game.back_mesh_ok = true;
+
+    # ------------------------------------------------------------
+    # Material
+    # ------------------------------------------------------------
+    #
+    # 正面：
+    #     绿色
+    #
+    # 背面：
+    #     红色
+    game.front_material = gfx.material();
+    game.back_material = gfx.material();
+
+    gfx.material_set_color(
+        ?game.front_material,
+        gm.vec4(
+            0.5,
+            1.0,
+            0.5,
+            1.0
+        )
+    );
+
+    gfx.material_set_color(
+        ?game.back_material,
+        gm.vec4(
+            1.0,
+            0.2,
+            0.2,
+            1.0
+        )
+    );
+
+    # ------------------------------------------------------------
+    # Camera
+    # ------------------------------------------------------------
+    #
+    # 让三角形尽量占据画面较大的区域，
+    # 但仍然完整显示。
+    #
+    # Camera：
+    #
+    #     (0, 0, 3)
+    #
+    # Triangle：
+    #
+    #     z = -1
+    #
+    # Camera 到 Triangle 的距离约为 4。
+    game.camera = gfx.camera_perspective(
+        gm.vec3(
+            0.0,
+            0.0,
+            3.0
+        ),
+        gm.vec3(
+            0.0,
+            0.0,
+            0.0
+        ),
+        gm.radians(60.0),
+        640.0 / 360.0,
+        0.1,
+        100.0
+    );
+
+    game.transform =
+        gm.transform_identity();
+
+    game.transform.position =
+        gm.vec3(
+            0.0,
+            0.0,
+            -1.0
+        );
+
+    # ------------------------------------------------------------
+    # 创建全屏 Quad
+    # ------------------------------------------------------------
+    #
+    # 第二 Pass 使用这个 Quad：
+    #
+    #     RenderTarget Texture
+    #              ↓
+    #             Quad
+    #              ↓
+    #         Vignette Shader
+    #              ↓
+    #            Window
+    var post_vertices: [32]f32 = [32]f32{
+        -0.5, -0.5, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+         0.5, -0.5, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+         0.5,  0.5, 0.0,  0.0, 0.0, 1.0,  1.0, 1.0,
+        -0.5,  0.5, 0.0,  0.0, 0.0, 1.0,  0.0, 1.0
+    };
+
+    var post_indices: [6]u32 = [6]u32{
+        0, 1, 2,
+        0, 2, 3
+    };
+
+    val post_mesh_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?post_vertices[0],
+            4,
+            ?vertex_format,
+            ?post_indices[0],
+            6
+        );
+
+    if (sel post_mesh_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.post_mesh = post_mesh_result.ok;
+    game.post_mesh_ok = true;
+
+    # ------------------------------------------------------------
+    # Post-processing Material
+    # ------------------------------------------------------------
+    #
+    # 从 RenderTarget 取得颜色 Texture。
+    val target_texture: *gfx.Texture =
+        gfx.render_target_texture(
+            ?game.target
+        );
+
+    game.post_material =
+        gfx.material();
+
+    # 第二 Pass 会把 640 × 360 的画面放大到 Window，
+    # 所以这里使用 Linear Filtering（线性过滤）。
+    val texture_added: err[gfx.MaterialError] =
+        gfx.material_add_texture_filtered(
+            ?game.post_material,
+            "source",
+            target_texture,
+            gfx.TextureFilter.linear{}
+        );
+
+    if (sel texture_added.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # 创建 Vignette Shader
+    # ------------------------------------------------------------
+    val shader_created: err[gfx.Error] =
+        gfx.shader(
+            ?game.post_shader,
+            ?VIGNETTE_VERT_SPV[0],
+            $length_of(VIGNETTE_VERT_SPV),
+            ?VIGNETTE_FRAG_SPV[0],
+            $length_of(VIGNETTE_FRAG_SPV)
+        );
+
+    if (sel shader_created.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.shader_ok = true;
+
+    # 第二 Pass 是一个全屏 2D Quad：
+    #
+    #     不需要 Back-face Culling
+    #     不需要 Depth Test
+    gfx.shader_set_state(
+        ?game.post_shader,
+        gfx.pipeline_desc_2d()
+    );
+
+    # ------------------------------------------------------------
+    # 全屏 Quad Transform
+    # ------------------------------------------------------------
+    #
+    # Quad 本身只有 1 × 1。
+    #
+    # 在 on_draw() 中根据当前 framebuffer 尺寸，
+    # 把它放大到整个屏幕。
+    game.post_transform =
+        gm.transform_identity();
+
+    # Vignette 强度。
+    #
+    # 0.7 会比较明显，
+    # 但仍然能清楚看到三角形的原始颜色。
+    game.params.strength =
+        gm.vec4(
+            0.7,
+            0.0,
+            0.0,
+            0.0
+        );
+
+    game.angle = 0.0;
+}
+
+fun on_tick(ctx: *Context) {
+    val game: *Game =
+        context_user(ctx):~*Game;
+
+    # ------------------------------------------------------------
+    # 三角形旋转
+    # ------------------------------------------------------------
+    #
+    # 保持第12课的旋转速度：
+    #
+    #     0.02 rad / frame
+    #
+    # 速度慢一点，方便观察：
+    #
+    #     绿色正面
+    #         ↓
+    #     侧面
+    #         ↓
+    #     红色背面
+    game.angle =
+        game.angle + 0.02;
+
+    if (game.angle >= gm.radians(360.0)) {
+        game.angle =
+            game.angle - gm.radians(360.0);
+    }
+
+    game.transform.rotation =
+        gm.quat_from_axis_angle(
+            gm.vec3(
+                0.0,
+                1.0,
+                0.0
+            ),
+            game.angle
+        );
+}
+
+fun on_draw(ctx: *Context) {
+    val game: *Game =
+        context_user(ctx):~*Game;
+
+    # ------------------------------------------------------------
+    # 开始 Frame
+    # ------------------------------------------------------------
+    val began: res[bool, gfx.Error] =
+        gfx.renderer_begin_frame(
+            ?game.renderer
+        );
+
+    if (sel began.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!began.ok) {
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # 读取当前 framebuffer 尺寸
+    # ------------------------------------------------------------
+    #
+    # Post-processing Quad 必须覆盖实际的 framebuffer。
+    #
+    # renderer_width / renderer_height
+    # 就是当前 Renderer 真正绘制到的尺寸。
+    val width: f32 = gfx.renderer_width(?game.renderer)::f32;
+    val height: f32 = gfx.renderer_height(?game.renderer)::f32;
+
+    # Quad 中心：
+    #
+    #     (width / 2, height / 2)
+    #
+    # Quad 尺寸：
+    #
+    #     width × height
+    game.post_transform.position =
+        gm.vec3(
+            width * 0.5,
+            height * 0.5,
+            0.0
+        );
+
+    game.post_transform.scale =
+        gm.vec3(
+            width,
+            height,
+            1.0
+        );
+
+    # ============================================================
+    # Pass 1：3D Scene → RenderTarget
+    # ============================================================
+    var scene: gfx.PassDesc = gfx.pass_scene(?game.camera);
+
+    # 默认的 target 是 none：
+    #
+    #     none
+    #       ↓
+    #     默认 Window / Swapchain
+    #       ↓
+    #     直接显示到屏幕
+    #
+    # 指定 RenderTarget：
+    #
+    #     some{?game.target}
+    #       ↓
+    #     game.target
+    #       ↓
+    #     先离屏渲染
+    scene.target =
+        opt[*gfx.RenderTarget].some{
+            ?game.target
+        };
+
+    var p1: gfx.Pass =
+        gfx.pass_begin(
+            ?game.renderer,
+            ?scene
+        );
+
+    # 正面绿色。
+    gfx.pass_draw_material(
+        ?p1,
+        ?game.front_mesh,
+        ?game.front_material,
+        ?game.transform
+    );
+
+    # 背面红色。
+    #
+    # 两个 Mesh 的位置和 Transform 完全相同，
+    # 唯一变化就是 Index 顺序。
+    gfx.pass_draw_material(
+        ?p1,
+        ?game.back_mesh,
+        ?game.back_material,
+        ?game.transform
+    );
+
+    gfx.pass_end(?p1);
+
+    # ============================================================
+    # RenderTarget → Texture
+    # ============================================================
+    val target_texture: *gfx.Texture =
+        gfx.render_target_texture(
+            ?game.target
+        );
+
+    # ============================================================
+    # Pass 2：Texture → Vignette Shader → Window
+    # ============================================================
+    var overlay: gfx.PassDesc =
+        gfx.pass_overlay();
+
+    # 这是一个覆盖整个屏幕的 Quad，
+    # 不需要使用 Pass 的 Frustum Culling（视锥体剔除）。
+    overlay.cull = false;
+
+    var p2: gfx.Pass =
+        gfx.pass_begin(
+            ?game.renderer,
+            ?overlay
+        );
+
+    # ------------------------------------------------------------
+    # binding 4：Vignette 参数
+    # ------------------------------------------------------------
+    #
+    # Shader 会从：
+    #
+    #     Params.strength.x
+    #
+    # 取得 Vignette 强度。
+    val params_ptr: *u8 = (?game.params):~*u8;
+    val params_size: usize = 16;
+
+    val user_set: err[gfx.Error] =
+        gfx.pass_set_user(
+            ?p2,
+            params_ptr,
+            params_size
+        );
+
+    if (sel user_set.err) {
+        gfx.pass_end(?p2);
+        val ended_after_error: err[gfx.Error] =
+            gfx.renderer_end_frame(
+                ?game.renderer
+            );
+
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # 使用自定义 Shader 绘制全屏 Quad
+    # ------------------------------------------------------------
+    #
+    # Material：
+    #
+    #     第一张 Texture
+    #         ↓
+    #     RenderTarget Color Texture
+    #
+    # Shader：
+    #
+    #     读取 Texture
+    #         ↓
+    #     根据 UV 计算屏幕中心距离
+    #         ↓
+    #     边缘变暗
+    #         ↓
+    #     输出最终颜色
+    gfx.pass_draw_shaded(
+        ?p2,
+        ?game.post_mesh,
+        ?game.post_material,
+        ?game.post_transform,
+        ?game.post_shader
+    );
+
+    gfx.pass_end(?p2);
+
+    # ------------------------------------------------------------
+    # 结束 Frame
+    # ------------------------------------------------------------
+    val ended: err[gfx.Error] =
+        gfx.renderer_end_frame(
+            ?game.renderer
+        );
+
+    if (sel ended.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val game: *Game =
+        context_user(ctx):~*Game;
+
+    if (game.renderer_ok) {
+        val device: *gfx.Device =
+            gfx.renderer_device(
+                ?game.renderer
+            );
+
+        if (game.shader_ok) {
+            gfx.shader_delete(
+                ?game.post_shader,
+                device
+            );
+        }
+
+        if (game.post_mesh_ok) {
+            gfx.mesh_delete(
+                device,
+                ?game.post_mesh
+            );
+        }
+
+        if (game.back_mesh_ok) {
+            gfx.mesh_delete(
+                device,
+                ?game.back_mesh
+            );
+        }
+
+        if (game.front_mesh_ok) {
+            gfx.mesh_delete(
+                device,
+                ?game.front_mesh
+            );
+        }
+
+        if (game.target_ok) {
+            gfx.render_target_delete(
+                device,
+                ?game.target
+            );
+        }
+
+        val renderer_closed: err[gfx.Error] =
+            gfx.renderer_dnit(
+                ?game.renderer
+            );
+
+        if (sel renderer_closed.err) {
+            context_fail(ctx, 1);
+        }
+    }
+
+    game.renderer_ok = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var ctx: Context;
+
+    val cfg: Config = Config{
+        width: 960,
+        height: 540,
+        title: "Lesson 14 - Vignette",
+        fixed_dt: SECOND / 60,
+        max_frame: SECOND / 4,
+        frame_dt: 0,
+        mode: WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] =
+        context_init(
+            ?ctx,
+            cfg
+        );
+
+    if (sel started.err) {
+        ret 1;
+    }
+
+    var game: Game;
+
+    game.renderer_ok = false;
+    game.target_ok = false;
+    game.front_mesh_ok = false;
+    game.back_mesh_ok = false;
+    game.post_mesh_ok = false;
+    game.shader_ok = false;
+
+    # Context 自己拥有 Window。
+    val renderer_started: err[gfx.Error] =
+        gfx.renderer_init(
+            ?game.renderer,
+            ?ctx.window
+        );
+
+    if (sel renderer_started.err) {
+        context_shutdown(?ctx);
+        ret 1;
+    }
+
+    game.renderer_ok = true;
+
+    context_set_user(
+        ?ctx,
+        ?game
+    );
+
+    var app: App = App{
+        f_init: on_init,
+        f_tick: on_tick,
+        f_draw: on_draw,
+        f_dnit: on_dnit,
+    };
+
+    val ran: res[i64, EngineError] =
+        run(
+            ?ctx,
+            ?app
+        );
+
+    val closed: err[ContextError] =
+        context_shutdown(
+            ?ctx
+        );
+
+    if (sel closed.err) {
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

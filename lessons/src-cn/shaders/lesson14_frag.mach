@@ -1,0 +1,142 @@
+# 第14课：Vignette Fragment Shader
+#
+# Fragment Shader（片段着色器）处理的是每一个 Pixel（像素）。
+#
+# 本课使用 UV / TexCoord：
+#
+#     (0, 0) ───────────── (1, 0)
+#       │                     │
+#       │        (0.5,0.5)    │
+#       │          中心        │
+#       │                     │
+#     (0, 1) ───────────── (1, 1)
+#
+# 当前 Pixel 越接近中心：
+#
+#     保留更多原始颜色
+#
+# 当前 Pixel 越接近边缘：
+#
+#     颜色越暗
+#
+# 这就是 Vignette（晕影）。
+
+use tex: shader.texture;
+
+rec Params {
+    strength: f32x4;
+}
+
+# RenderTarget 的 Color Texture。
+#[sampler(0, 1)]
+var source: tex.Sampler2D;
+
+# Game 自己提供的 Vignette 参数。
+#[uniform(0, 4)]
+var params: Params;
+
+# Vertex Shader 传来的 UV。
+#[input(0)]
+var in_uv: f32x2;
+
+# 最终输出颜色。
+#[output(0)]
+var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    # --------------------------------------------------------
+    # 读取上一 Pass 的画面
+    #
+    # tex.sample_2d 就是 OpImageSampleImplicitLod 的封装，
+    # 第 13 课已经演示过它的底层形式，这里直接用标准库版本。
+    # --------------------------------------------------------
+    val texel: f32x4 =
+        tex.sample_2d(
+            source,
+            in_uv
+        );
+
+    # --------------------------------------------------------
+    # 把 UV 的中心移动到 0
+    # --------------------------------------------------------
+    #
+    # 原本：
+    #
+    #     0.0 ~ 1.0
+    #
+    # 减去 0.5 后：
+    #
+    #    -0.5 ~ +0.5
+    #
+    # 此时屏幕中心就是：
+    #
+    #     (0, 0)
+    val centered_x: f32 =
+        (in_uv[0] - 0.5) * 2.0;
+
+    val centered_y: f32 =
+        (in_uv[1] - 0.5) * 2.0;
+
+    # --------------------------------------------------------
+    # 计算到屏幕中心的平方距离
+    # --------------------------------------------------------
+    #
+    # 使用平方距离就不需要开平方：
+    #
+    #     distance² = x² + y²
+    #
+    # 中心：
+    #
+    #     0² + 0² = 0
+    #
+    # 越靠近角落：
+    #
+    #     distance² 越大
+    val radius2: f32 =
+        centered_x * centered_x
+        + centered_y * centered_y;
+
+    # --------------------------------------------------------
+    # 根据距离计算边缘暗度
+    # --------------------------------------------------------
+    #
+    # strength：
+    #
+    #     0.0 → 基本没有 Vignette
+    #     越大 → 边缘越暗
+    val strength: f32 =
+        params.strength[0];
+
+    var vignette: f32 =
+        1.0 - radius2 * strength;
+
+    # 最暗不要低于 0。
+    if (vignette < 0.0) {
+        vignette = 0.0;
+    }
+
+    # --------------------------------------------------------
+    # 原图 × Vignette
+    # --------------------------------------------------------
+    #
+    # 中心区域：
+    #
+    #     vignette ≈ 1
+    #
+    # 所以颜色基本保持不变。
+    #
+    # 边缘区域：
+    #
+    #     vignette 越接近 0
+    #
+    # 所以画面越暗。
+    out_colour =
+        f32x4{
+            texel[0] * vignette,
+            texel[1] * vignette,
+            texel[2] * vignette,
+            texel[3]
+        };
+}
+

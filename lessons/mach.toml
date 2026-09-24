@@ -1,0 +1,301 @@
+[project]
+id = "base_window"
+version = "0.1.0"
+mach = "^5"
+src = "src-cn"
+out = "out"
+#out = "out/{target.name}/{profile.name}"
+
+[target.spirv]
+isa = "spirv"
+os = "freestanding"
+abi = "spirv"
+env = "vulkan1.0"
+
+[target.linux-x86_64]
+isa = "x86_64"
+os  = "linux"
+abi = "sysv64"
+
+[target.windows]
+isa = "x86_64"
+os  = "windows"
+abi = "win64"
+
+[target.darwin]
+isa = "x86_64"
+os  = "darwin"
+abi = "sysv64"
+
+[profile.debug]
+default = true
+opt = 0
+debug = true
+simd = "scalarize"
+vectorize = false
+float_reassoc = false
+
+[profile.release]
+opt = 2
+debug = false
+simd = "scalarize"
+vectorize = false
+float_reassoc = false
+
+[dep.boom]
+#path = "dep/boom"
+git = "https://github.com/briar-systems/boom"
+ref = "branch/main"
+
+[dep.std]
+git = "https://github.com/briar-systems/mach-std"
+ref = "branch/main"
+
+[dep.glfw]
+git = "https://github.com/briar-systems/mach-glfw"
+ref = "branch/main"
+
+[dep.image]
+git = "https://github.com/briar-systems/mach-image"
+ref = "branch/main"
+
+[dep.gltf]
+git = "https://github.com/briar-systems/mach-gltf"
+ref = "branch/main"
+
+# boom links these transitively, but a consumer must still name every dep it
+# shares with a path dependency and match its ref exactly.
+[dep.audio]
+git = "https://github.com/briar-systems/mach-audio"
+ref = "branch/main"
+
+[dep.font]
+git = "https://github.com/briar-systems/mach-font"
+ref = "branch/dev"
+
+[dep.phys]
+git = "https://github.com/briar-systems/mach-phys"
+ref = "branch/main"
+
+[dep.vk]
+git = "https://github.com/briar-systems/mach-vk"
+ref = "branch/main"
+
+# ----------------------------------------------
+[artifact.1_hello_window]
+default = true
+kind = "bin"
+entry = "1_hello_window.mach"
+out = "bin/1_hello_window"
+targets = ["*"]
+link = []
+need = []
+
+[artifact.2_clear_screen]
+kind = "bin"
+entry = "2_clear_screen.mach"
+out = "bin/2_clear_screen"
+targets = ["*"]
+link = []
+need = []
+
+[artifact.3_first_triangle]
+kind = "bin"
+entry = "3_first_triangle.mach"
+out = "bin/3_first_triangle"
+targets = ["*"]
+link = []
+need = []
+
+[artifact.4_model_view_projection]
+kind = "bin"
+entry = "4_model_view_projection.mach"
+out = "bin/4_model_view_projection"
+targets = ["*"]
+link = []
+need = []
+
+[artifact.5_winding_order_and_back-face_culling]
+kind = "bin"
+entry = "5_winding_order_and_back-face_culling.mach"
+out = "bin/5_winding_order_and_back-face_culling"
+targets = ["*"]
+link = []
+need = []
+
+[artifact.6_color_and_material]
+kind = "bin"
+entry = "6_color_and_material.mach"
+out = "bin/6_color_and_material"
+targets = ["*"]
+link = []
+need = []
+
+[artifact.7_texture_and_uv]
+kind = "bin"
+entry = "7_texture_and_uv.mach"
+out = "bin/7_texture_and_uv"
+targets = ["*"]
+link = []
+need = []
+
+[artifact.8_texture_filtering]
+kind = "bin"
+entry = "8_texture_filtering.mach"
+out = "bin/8_texture_filtering"
+targets = ["*"]
+link = []
+need = []
+
+[artifact.9_first_shader]
+kind = "bin"
+entry = "9_first_shader.mach"
+out = "bin/9_first_shader"
+targets = ["*"]
+link = []
+need = ["artifact.shader-lesson9_*"]
+
+[artifact.shader-lesson9_vert]
+kind = "bin"
+entry = "shaders/lesson9_vert.mach"
+out = "spv/lesson9_vert{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.shader-lesson9_frag]
+kind = "bin"
+entry = "shaders/lesson9_frag.mach"
+out = "spv/lesson9_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.10_shader_uniform]
+kind = "bin"
+entry = "10_shader_uniform.mach"
+out = "bin/10_shader_uniform"
+targets = ["*"]
+link = []
+need = ["artifact.shader-lesson10_*"]
+
+[artifact.shader-lesson10_vert]
+kind = "bin"
+entry = "shaders/lesson10_vert.mach"
+out = "spv/lesson10_vert{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.shader-lesson10_frag]
+kind = "bin"
+entry = "shaders/lesson10_frag.mach"
+out = "spv/lesson10_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.11_storage_buffer]
+kind = "bin"
+entry = "11_storage_buffer.mach"
+out = "bin/11_storage_buffer"
+targets = ["*"]
+link = []
+need = ["artifact.shader-lesson11_*"]
+
+[artifact.shader-lesson11_vert]
+kind = "bin"
+entry = "shaders/lesson11_vert.mach"
+out = "spv/lesson11_vert{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.shader-lesson11_frag]
+kind = "bin"
+entry = "shaders/lesson11_frag.mach"
+out = "spv/lesson11_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.12_render_target]
+kind = "bin"
+entry = "12_render_target.mach"
+out = "bin/12_render_target"
+targets = ["*"]
+link = []
+need = []
+
+[artifact.13_post_process]
+kind = "bin"
+entry = "13_post_process.mach"
+out = "bin/13_post_process"
+targets = ["*"]
+link = []
+need = ["artifact.shader-lesson13_*"]
+
+[artifact.shader-lesson13_vert]
+kind = "bin"
+entry = "shaders/lesson13_vert.mach"
+out = "spv/lesson13_vert{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.shader-lesson13_frag]
+kind = "bin"
+entry = "shaders/lesson13_frag.mach"
+out = "spv/lesson13_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.14_vignette]
+kind = "bin"
+entry = "14_vignette.mach"
+out = "bin/14_vignette"
+targets = ["*"]
+link = []
+need = ["artifact.shader-lesson14_*"]
+
+[artifact.shader-lesson14_vert]
+kind = "bin"
+entry = "shaders/lesson14_vert.mach"
+out = "spv/lesson14_vert{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.shader-lesson14_frag]
+kind = "bin"
+entry = "shaders/lesson14_frag.mach"
+out = "spv/lesson14_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.15_color_tint]
+kind = "bin"
+entry = "15_color_tint.mach"
+out = "bin/15_color_tint"
+targets = ["*"]
+link = []
+need = ["artifact.shader-lesson15_*"]
+
+[artifact.shader-lesson15_vert]
+kind = "bin"
+entry = "shaders/lesson15_vert.mach"
+out = "spv/lesson15_vert{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.shader-lesson15_frag]
+kind = "bin"
+entry = "shaders/lesson15_frag.mach"
+out = "spv/lesson15_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+

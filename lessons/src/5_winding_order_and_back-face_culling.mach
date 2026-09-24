@@ -1,0 +1,453 @@
+# Example 05 - Winding Order & Back-face Culling
+#
+# This example studies two very important 3D concepts:
+#
+# 1. Winding Order
+#    Connecting the three vertices of a triangle in different orders
+#    produces different facing directions.
+#
+#    0 -> 1 -> 2: Counter-Clockwise
+#    0 -> 2 -> 1: Clockwise
+#
+# 2. Back-face Culling
+#    The 3D Pipeline performs Back-face Culling by default.
+#
+#    The current boom rule is:
+#
+#    Front Face = Counter-Clockwise
+#    Back Face  = Clockwise
+#
+#    When a triangle faces away from the camera,
+#    the GPU culls this face and does not continue rasterizing it.
+#
+# This example draws two exactly overlapping triangles:
+#
+#    Green triangle: 0 -> 1 -> 2
+#    Red triangle:   0 -> 2 -> 1
+#
+# Their positions, vertex coordinates, Transform, and Camera are all identical.
+# The only differences are the vertex index order and the material color.
+#
+# When the triangle rotates around the Y axis:
+#
+#    Green face toward the camera -> see green
+#    Red face toward the camera   -> see red
+#    Nearly side-on                -> looks narrower and narrower
+#
+# This makes it possible to directly observe:
+#
+#    Winding Order
+#         ↓
+#    Front Face / Back Face
+#         ↓
+#    Back-face Culling
+#
+# Note:
+#
+# pass_desc.cull controls Frustum Culling,
+# not the Back-face Culling studied in this lesson.
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    renderer: gfx.Renderer;
+
+    # Both Meshes use the same vertices, only the Index order changes.
+    mesh_front: gfx.Mesh;
+    mesh_back: gfx.Mesh;
+
+    # The two Materials use different colors,
+    # making it easy to directly observe which face is toward the Camera.
+    material_front: gfx.Material;
+    material_back: gfx.Material;
+
+    camera: gfx.Camera;
+
+    # Both Meshes share the same Transform,
+    # so they always overlap exactly.
+    transform: gm.Transform;
+
+    # Current rotation angle, in radians.
+    angle: f32;
+
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer shutdown failed: {}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+    g.angle = 0.0;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer initialization failed: {}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # Standard 3D vertex layout:
+    #
+    # Position: 3
+    # Normal: 3
+    # UV / TexCoord: 2
+    #
+    # One Vertex has 8 f32 values in total.
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.9, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    # Counter-Clockwise:
+    #
+    #        2
+    #       / \
+    #      /   \
+    #     0-----1
+    #        ->
+    # The current boom 3D Pipeline defines this as the Front Face.
+    var front_indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    # Clockwise:
+    #
+    #        2
+    #       / \
+    #      /   \
+    #     0-----1
+    #        <-
+    # The current boom 3D Pipeline defines this as the Back Face.
+    var back_indices: [3]u32 = [3]u32{
+        0, 2, 1,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # Create the Front Face Mesh.
+    #
+    # Note: the vertex coordinates are completely unchanged.
+    # What actually changes is the order of the Indices.
+    val front_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?front_indices[0],
+        3,
+    );
+    if (sel front_result.err) {
+        print.eprintlnf(
+            "Front Mesh creation failed: {}",
+            gfx.error_message(front_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh_front = front_result.ok;
+
+    # Create the Back Face Mesh.
+    #
+    # It uses exactly the same vertices,
+    # only reversing 0,1,2 into 0,2,1.
+    val back_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?back_indices[0],
+        3,
+    );
+    if (sel back_result.err) {
+        print.eprintlnf(
+            "Back Mesh creation failed: {}",
+            gfx.error_message(back_result.err),
+        );
+        gfx.mesh_delete(
+            d,
+            ?g.mesh_front,
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh_back = back_result.ok;
+
+    # Green: represents the Front Face.
+    g.material_front = gfx.material();
+    gfx.material_set_color(
+        ?g.material_front,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    # Red: represents the Back Face.
+    #
+    # The color is only an aid for observation.
+    # What truly determines Front / Back is still Winding Order.
+    g.material_back = gfx.material();
+    gfx.material_set_color(
+        ?g.material_back,
+        gm.vec4(1.0, 0.1, 0.1, 1.0),
+    );
+
+    # Perspective Camera.
+    val aspect: f32 = w::f32 / h::f32;
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 4.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    g.transform = gm.transform_identity();
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # Make both triangles rotate together around the Y axis.
+    #
+    # Because they share the same Transform,
+    # the only change affecting the Front / Back determination is
+    # the viewing direction.
+    g.angle = g.angle + 0.02;
+
+    if (g.angle >= gm.radians(360.0)) {
+        g.angle = g.angle - gm.radians(360.0);
+    }
+
+    g.transform.rotation = gm.quat_from_axis_angle(
+        gm.vec3(0.0, 1.0, 0.0),
+        g.angle,
+    );
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Aspect Ratio participates in the Projection Matrix.
+    g.camera.aspect = w / h;
+
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame begin failed: {}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Scene Pass uses the current 3D Camera.
+    #
+    # pass_desc.cull is not modified here.
+    # What it enables by default is Frustum Culling,
+    # which is a different mechanism from the GPU's Back-face Culling.
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # The two Meshes overlap exactly.
+    #
+    # Green Mesh:
+    #    0,1,2 → Counter-Clockwise → Front Face
+    #
+    # Red Mesh:
+    #    0,2,1 → Clockwise → Back Face
+    #
+    # When the red face is toward the Camera,
+    # it becomes the Front Face, so red is visible.
+    #
+    # When the red face is away from the Camera,
+    # Back-face Culling removes it.
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh_front,
+        ?g.material_front,
+        ?g.transform,
+    );
+
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh_back,
+        ?g.material_back,
+        ?g.transform,
+    );
+
+    gfx.pass_end(?pass);
+
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame end failed: {}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # Before the Renderer shuts down, the GPU Meshes it owns must be released first.
+    gfx.mesh_delete(
+        d,
+        ?g.mesh_front,
+    );
+    gfx.mesh_delete(
+        d,
+        ?g.mesh_back,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "Lesson 05: Winding Order and Back-face Culling",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context initialization failed: {}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    val ran: res[i64, EngineError] = run(?ctx, ?app);
+
+    val closed: err[ContextError] = context_shutdown(?ctx);
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context shutdown failed: {}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "Game loop failed: {}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

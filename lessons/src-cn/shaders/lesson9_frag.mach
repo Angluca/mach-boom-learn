@@ -1,0 +1,81 @@
+# 第 09 课：Fragment Shader（片段着色器）
+#
+# Fragment Shader 负责决定一个 Fragment 最终写入什么颜色。
+#
+# 本课把三个东西组合起来：
+#
+#    Texture
+#    Material Base Color
+#    UV
+#
+# 并故意加入一个简单的 UV Gradient（UV 渐变），
+# 让我们可以非常明确地看到：
+#
+#    Fragment Shader 确实正在使用我们自己写的逻辑。
+
+use tex: shader.texture;
+
+# Material 的 Base Color（基础颜色）。
+#
+# binding 2 是 boom 统一提供的材质颜色。
+rec Base {
+    colour: f32x4;
+}
+
+# binding 1：
+# Material 的第一张 Texture。
+#[sampler(0, 1)]
+var albedo: tex.Sampler2D;
+
+# binding 2：
+# Material Base Color。
+#[uniform(0, 2)]
+var base: Base;
+
+# Vertex Shader 插值之后传来的 UV。
+#[input(0)]
+var in_uv: f32x2;
+
+# 最终输出到 Color Attachment（颜色附件）。
+#[output(0)]
+var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    # 根据 UV 生成一个简单的颜色渐变。
+    #
+    # U 越往右：
+    #    Red 越强
+    #
+    # V 越往上：
+    #    Blue 越强
+    #
+    # Green 固定保持 0.5。
+    val gradient: f32x4 = f32x4{
+        in_uv[0],
+        0.5,
+        in_uv[1],
+        1.0,
+    };
+
+    # 从 Texture 中进行采样。
+    #
+    # Texture Sampling（纹理采样）：
+    # 根据 UV 找到 Texture 对应位置的颜色。
+    val texel: f32x4 = tex.sample_2d(
+        albedo,
+        in_uv,
+    );
+
+    # 最终颜色：
+    #
+    #    Texture
+    #       ×
+    #    Material Base Color
+    #       ×
+    #    我们自己写的 UV Gradient
+    #
+    # 这就是完全由游戏自己控制的 Fragment Shader。
+    out_colour = texel * base.colour * gradient;
+}
+

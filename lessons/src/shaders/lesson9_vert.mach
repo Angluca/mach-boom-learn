@@ -1,0 +1,107 @@
+# Lesson 09: Vertex Shader
+#
+# This Shader has the same basic structure as boom's default Mesh Vertex Shader.
+#
+# The current standard 3D Mesh provides:
+#
+#    location 0 → Position
+#    location 1 → Normal
+#    location 2 → UV / TexCoord
+#
+# What this lesson actually uses:
+#
+#    Position
+#    UV
+#
+# Normal does not even need to be passed through for now,
+# because the custom Fragment Shader in Lesson 09 does not do lighting.
+
+rec Matrices {
+    mvp_0:   f32x4;
+    mvp_1:   f32x4;
+    mvp_2:   f32x4;
+    mvp_3:   f32x4;
+    model_0: f32x4;
+    model_1: f32x4;
+    model_2: f32x4;
+    model_3: f32x4;
+}
+
+# binding 0:
+#    boom provides Model / View / Projection data on every Mesh Draw.
+#[uniform(0, 0)]
+var matrices: Matrices;
+
+# Vertex Attribute 0:
+# Position
+#[input(0)]
+var in_position: f32x3;
+
+# Vertex Attribute 2:
+# UV / TexCoord
+#[input(2)]
+var in_uv: f32x2;
+
+# UV passed to the Fragment Shader.
+#[output(0)]
+var out_uv: f32x2;
+
+# Vulkan's final vertex position.
+#[builtin("position")]
+var position: f32x4;
+
+# A 4×4 Matrix does not have a direct matrix type in Mach Shader.
+# boom passes Mat4 in as four f32x4 columns.
+#
+# Therefore, here we follow the Column-major convention,
+# combining the four columns into:
+#
+#    M × P
+#
+# In fact, the passed-in matrices.mvp is already:
+#
+#    Projection × View × Model
+#
+# So it can be used directly here.
+fun mul_point(
+    c0: f32x4,
+    c1: f32x4,
+    c2: f32x4,
+    c3: f32x4,
+    p: f32x4,
+) f32x4 {
+    ret c0 * f32x4{p[0], p[0], p[0], p[0]}
+        + c1 * f32x4{p[1], p[1], p[1], p[1]}
+        + c2 * f32x4{p[2], p[2], p[2], p[2]}
+        + c3 * f32x4{p[3], p[3], p[3], p[3]};
+}
+
+#[stage("vertex")]
+fun vert_main() {
+    # The vertex's original Position.
+    val p: f32x4 = f32x4{
+        in_position[0],
+        in_position[1],
+        in_position[2],
+        1.0,
+    };
+
+    # Model → View → Projection.
+    #
+    # The final result is written to Vulkan's position,
+    # so the GPU knows where this vertex should appear on screen.
+    position = mul_point(
+        matrices.mvp_0,
+        matrices.mvp_1,
+        matrices.mvp_2,
+        matrices.mvp_3,
+        p,
+    );
+
+    # UV does not need spatial transformation.
+    #
+    # Because UV is already a texture coordinate,
+    # it can be passed directly to the Fragment Shader.
+    out_uv = in_uv;
+}
+

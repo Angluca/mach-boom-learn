@@ -1,0 +1,107 @@
+# 第 09 课：Vertex Shader（顶点着色器）
+#
+# 本 Shader 与 boom 默认 Mesh Vertex Shader 的基本结构一致。
+#
+# 当前标准 3D Mesh 提供：
+#
+#    location 0 → Position（位置）
+#    location 1 → Normal（法线）
+#    location 2 → UV / TexCoord（纹理坐标）
+#
+# 本课真正使用：
+#
+#    Position
+#    UV
+#
+# Normal 暂时传递也不需要，
+# 因为第 9 课的自定义 Fragment Shader 不做光照。
+
+rec Matrices {
+    mvp_0:   f32x4;
+    mvp_1:   f32x4;
+    mvp_2:   f32x4;
+    mvp_3:   f32x4;
+    model_0: f32x4;
+    model_1: f32x4;
+    model_2: f32x4;
+    model_3: f32x4;
+}
+
+# binding 0：
+#    boom 每次 Mesh Draw 都会提供 Model / View / Projection 数据。
+#[uniform(0, 0)]
+var matrices: Matrices;
+
+# Vertex Attribute 0：
+# Position（位置）
+#[input(0)]
+var in_position: f32x3;
+
+# Vertex Attribute 2：
+# UV / TexCoord（纹理坐标）
+#[input(2)]
+var in_uv: f32x2;
+
+# 传给 Fragment Shader 的 UV。
+#[output(0)]
+var out_uv: f32x2;
+
+# Vulkan 的最终顶点位置。
+#[builtin("position")]
+var position: f32x4;
+
+# 4×4 Matrix（矩阵）在 Mach Shader 中没有直接的矩阵类型。
+# boom 会把 Mat4 作为 4 个 f32x4 列传进来。
+#
+# 因此这里按照 Column-major（列主序）的方式，
+# 将四列组合成：
+#
+#    M × P
+#
+# 实际上传入的 matrices.mvp 已经是：
+#
+#    Projection × View × Model
+#
+# 所以这里直接使用它即可。
+fun mul_point(
+    c0: f32x4,
+    c1: f32x4,
+    c2: f32x4,
+    c3: f32x4,
+    p: f32x4,
+) f32x4 {
+    ret c0 * f32x4{p[0], p[0], p[0], p[0]}
+        + c1 * f32x4{p[1], p[1], p[1], p[1]}
+        + c2 * f32x4{p[2], p[2], p[2], p[2]}
+        + c3 * f32x4{p[3], p[3], p[3], p[3]};
+}
+
+#[stage("vertex")]
+fun vert_main() {
+    # 顶点原始 Position。
+    val p: f32x4 = f32x4{
+        in_position[0],
+        in_position[1],
+        in_position[2],
+        1.0,
+    };
+
+    # Model → View → Projection。
+    #
+    # 最终结果写入 Vulkan 的 position，
+    # GPU 才知道这个顶点应该出现在屏幕什么位置。
+    position = mul_point(
+        matrices.mvp_0,
+        matrices.mvp_1,
+        matrices.mvp_2,
+        matrices.mvp_3,
+        p,
+    );
+
+    # UV 不需要进行空间变换。
+    #
+    # 因为 UV 本身已经是纹理坐标，
+    # 可以直接传给 Fragment Shader。
+    out_uv = in_uv;
+}
+

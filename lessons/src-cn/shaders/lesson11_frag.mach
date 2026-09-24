@@ -1,0 +1,85 @@
+# 第 11 课：Fragment Shader（片段着色器）
+#
+# 本课第一次读取 Storage Buffer。
+#
+# binding 4：
+#
+#    Uniform
+#    保存当前 Draw 的 index。
+#
+# binding 8：
+#
+#    Storage Buffer
+#    保存 32 个颜色。
+#
+# Shader 的工作：
+#
+#    读取 index
+#        ↓
+#    读取 palette[index]
+#        ↓
+#    输出颜色
+#
+# ------------------------------------------------------------
+# 为什么 Storage Buffer 使用 std430？
+# ------------------------------------------------------------
+#
+# Storage Buffer 使用 std430（Standard Storage Buffer Layout）。
+#
+# 本例数组元素是 f32x4：
+#
+#    [32]f32x4
+#
+# 每个元素正好 16 bytes，
+# 所以 CPU 端的：
+#
+#    [32]gm.Vec4
+#
+# 可以直接作为连续的内存写进去。
+#
+# 这就是 Storage Buffer 非常适合保存数组数据的原因。
+
+rec Params {
+    # control.x：
+    # 当前 Draw 需要使用的颜色索引。
+    control: f32x4;
+}
+
+rec Palette {
+    # 32 个颜色。
+    #
+    # Shader 可以直接按照 index 读取：
+    #
+    #    palette.items[index]
+    items: [32]f32x4;
+}
+
+# binding 4：
+# 当前 Draw 自己的 Uniform 参数。
+#[uniform(0, 4)]
+var params: Params;
+
+# binding 8：
+# 整个 Frame 共用的 Storage Buffer。
+#[storage(0, 8)]
+var palette: Palette;
+
+#[output(0)]
+var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    # Uniform 只负责告诉 Shader：
+    #
+    #    “我要哪个颜色？”
+    #
+    # 真正的颜色数据来自 Storage Buffer。
+    val index: u32 = params.control[0]::u32;
+
+    # 从 Storage Buffer 中读取颜色。
+    val colour: f32x4 = palette.items[index];
+
+    # 输出 Storage Buffer 中保存的颜色。
+    out_colour = colour;
+}
+

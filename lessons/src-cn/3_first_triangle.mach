@@ -1,0 +1,332 @@
+# Example 03 - First Triangle
+#
+# 本例第一次真正绘制 3D 几何体。
+#
+# 需要学习的概念：
+#
+# Vertex（顶点）
+#    描述几何体上的一个位置以及它携带的其它属性。
+#
+# Position（位置）
+#    顶点在模型空间中的 XYZ 坐标。
+#
+# Normal（法线）
+#    表面的方向信息，后面的 Lighting（光照）会使用它。
+#
+# UV / TexCoord（纹理坐标）
+#    用来告诉 Shader 如何对应纹理。
+#
+# Vertex Format（顶点格式）
+#    描述一个顶点有哪些属性，以及它们在内存中的排列方式。
+#
+# Index（索引）
+#    指向 Vertex 的编号，多个三角形可以复用相同顶点。
+#
+# Mesh（网格）
+#    GPU 中真正用于绘制的顶点和索引数据。
+#
+# Draw Call（绘制调用）
+#    向 Renderer 提交一次几何绘制请求。
+#
+# 本例仍然只使用一个三角形，
+# 重点是把数据真正送进 3D Pipeline。
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    renderer: gfx.Renderer;
+    mesh: gfx.Mesh;
+    material: gfx.Material;
+    camera: gfx.Camera;
+    transform: gm.Transform;
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer 关闭失败：{}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer 初始化失败：{}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # 标准 3D 顶点布局：
+    #
+    # Position(3) + Normal(3) + UV(2)
+    #
+    # 每个 Vertex（顶点）共 8 个 f32，也就是 32 bytes。
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.9, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    # 三角形需要 3 个 Index。
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # 当前 Mesh API 需要：
+    #
+    #    vertices: ptr
+    #    indices:  *u32
+    #
+    # 数组首元素已经提供正确的指针类型，
+    # 不需要再手动进行 :~ 类型解释。
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh 创建失败：{}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # Material（材质）保存表面颜色等信息。
+    #
+    # 本课还不深入讲 Material，
+    # 这里使用统一的浅绿色作为三角形默认颜色。
+    g.material = gfx.material();
+    gfx.material_set_color(
+        ?g.material,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    # 创建 Perspective Camera（透视摄像机）。
+    #
+    # Camera 会提供：
+    #
+    #    View Matrix（视图矩阵）
+    #    Projection Matrix（投影矩阵）
+    val aspect: f32 = w::f32 / h::f32;
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 4.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # Transform（变换）控制模型在世界中的位置、旋转和缩放。
+    g.transform = gm.transform_identity();
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # 本课暂时不让三角形运动。
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # 窗口可以调整大小，所以每帧更新 Aspect Ratio（宽高比）。
+    g.camera.aspect = w / h;
+
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame 开始失败：{}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+    pass_desc.clear = gfx.pass_scene(?g.camera).clear;
+    pass_desc.clear = gfx.pass_scene(?g.camera).clear;
+
+    # Scene Pass（场景通道）使用 Camera 的 3D 投影。
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # Draw Call：
+    # 把 Mesh、Material 和 Transform 提交给当前 3D Pass。
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform,
+    );
+
+    gfx.pass_end(?pass);
+
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame 结束失败：{}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "第 03 课：First Triangle",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context 初始化失败：{}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    context_set_user(?ctx, (?game)::ptr);
+
+    val ran: res[i64, EngineError] = run(?ctx, ?app);
+
+    val closed: err[ContextError] = context_shutdown(?ctx);
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context 关闭失败：{}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "游戏循环失败：{}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

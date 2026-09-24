@@ -1,0 +1,238 @@
+# Example 02 - Clear Screen
+#
+# This example studies the basic Frame flow of the Renderer:
+#
+# 1. Renderer
+#    Responsible for the GPU, Swapchain, and Frame submission.
+#
+# 2. Frame
+#    One complete screen update.
+#
+# 3. Render Pass
+#    Describes which target this stage draws to, and how color and depth
+#    are handled at the start.
+#
+# 4. Clear
+#    Sets the screen to a specified color when the Pass begins.
+#
+# 5. Present
+#    Submits and displays this Frame to the window.
+#
+# This lesson does not draw a Mesh yet.
+# There is only one goal:
+#
+#    Renderer → Frame → Pass → Clear → End Frame
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    renderer: gfx.Renderer;
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer shutdown failed: {}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+
+    # The current version of renderer_init() directly receives Window.
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer initialization failed: {}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # This lesson has no game state that needs updating.
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # renderer_begin_frame() now returns res[bool, gfx.Error].
+    #
+    # ok = false:
+    #    The Swapchain was recreated, or the window is minimized.
+    #    The current Frame should not continue drawing; try again next frame.
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame begin failed: {}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Overlay Pass uses pixel coordinates.
+    # This lesson does not draw 2D graphics yet; it is only used to start a Pass
+    # in the simplest way.
+    var pass_desc: gfx.PassDesc = gfx.pass_overlay();
+
+    # clear is now an Option:
+    #
+    #    some{color}
+    #        means clear to this color when the Pass begins.
+    #
+    #    none{}
+    #        means do not clear.
+    pass_desc.clear = opt[gm.Vec4].some{
+        gm.vec4(
+            0.05,
+            0.08,
+            0.12,
+            1.0,
+        )
+    };
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # The current Pass has no Draw Calls.
+    gfx.pass_end(?pass);
+
+    # renderer_end_frame() now returns err[gfx.Error].
+    # It submits and Presents the current Frame.
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame end failed: {}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # Renderer must be shut down before Context.
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "Lesson 02: Clear Screen",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context initialization failed: {}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    val ran: res[i64, EngineError] = run(?ctx, ?app);
+
+    val closed: err[ContextError] = context_shutdown(?ctx);
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context shutdown failed: {}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "Game loop failed: {}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

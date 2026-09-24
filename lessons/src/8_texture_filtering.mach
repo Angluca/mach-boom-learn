@@ -1,0 +1,586 @@
+# Example 08 - Texture Filtering
+#
+# This example studies Texture Filtering.
+#
+# When a Texture and the model size match exactly,
+# the GPU can read the corresponding Texel fairly directly.
+#
+# But in real games we often encounter:
+#
+#    A very small Texture
+#          ↓
+#    being magnified onto a larger screen area
+#
+# At that point one screen pixel may correspond to multiple Texels in the Texture.
+# The GPU then needs to decide:
+#
+#    "How should these Texels be combined?"
+#
+# This is Texture Filtering.
+#
+# This lesson studies two of the most basic filtering modes:
+#
+# 1. Nearest Filtering
+#    Directly selects the Texel closest to the sample position.
+#
+#    Advantages:
+#    Image edges stay sharp, with a clear pixelated look.
+#
+#    Often used for:
+#    Pixel Art and other images that need to preserve hard edges.
+#
+# 2. Linear Filtering
+#    Interpolates based on the colors of nearby Texels,
+#    making color changes smoother.
+#
+#    Advantages:
+#    Magnified images do not show obvious blocky jumps.
+#
+# This example uses the 4×4 checkerboard Texture from the previous lesson,
+# and then puts the same Texture onto two triangles:
+#
+#    Left:  Nearest
+#    Right: Linear
+#
+# The two triangles have identical:
+#
+#    Mesh
+#    UV
+#    Texture
+#    Transform
+#
+# The only difference is the TextureFilter in the Material.
+#
+# Therefore we can directly attribute the observed result to:
+#
+#    Filtering
+#
+# Note:
+#
+# Current boom does not yet generate Mipmaps,
+# and the current engine does not yet focus on the complete Mipmap sampling chain
+# when textures are minified.
+# So this lesson mainly observes:
+#
+#    Texture Magnification
+#
+# That is:
+#
+#    A very small Texture
+#         ↓
+#    drawn magnified
+#         ↓
+#    the difference between Nearest / Linear
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    # Renderer manages the GPU, Swapchain, and Frame.
+    renderer: gfx.Renderer;
+
+    # The two triangles share the same Mesh.
+    mesh: gfx.Mesh;
+
+    # The same Texture is shared by both Materials.
+    texture: gfx.Texture;
+
+    # The left side uses Nearest Filtering.
+    material_nearest: gfx.Material;
+
+    # The right side uses Linear Filtering.
+    material_linear: gfx.Material;
+
+    # 3D Camera.
+    camera: gfx.Camera;
+
+    # The two triangles use different positions,
+    # but their geometry data is completely identical.
+    transform_nearest: gm.Transform;
+    transform_linear: gm.Transform;
+
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer shutdown failed: {}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    # Initialize Renderer.
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer initialization failed: {}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # GPU resources are created using the Device owned by the Renderer.
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # ============================================================
+    # Create the triangle
+    # ============================================================
+    #
+    # Standard 3D vertex layout:
+    #
+    # Position 3
+    # Normal 3
+    # UV / TexCoord 2
+    #
+    # What this lesson really focuses on is the last two UV values.
+    #
+    # The three vertices of the triangle correspond to:
+    #
+    #    (0.0, 0.0)
+    #    (1.0, 0.0)
+    #    (0.5, 1.0)
+    #
+    # This means the entire Texture is mapped onto the entire triangle.
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -1.2, -1.0, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+
+        # Vertex 1
+         1.2, -1.0, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+
+        # Vertex 2
+         0.0,  1.0, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # Create Mesh.
+    #
+    # The first element of the array can already be used as the corresponding pointer,
+    # so no extra :~ type cast is needed.
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh creation failed: {}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # ============================================================
+    # Create a 4×4 checkerboard Texture
+    # ============================================================
+    #
+    # Still using a program-generated Texture,
+    # so this lesson only studies Filtering and does not need to add image resource management.
+    var pixels: [64]u8 = [64]u8{
+        # Row 0
+        255, 255, 255, 255,   40, 40, 40, 255,
+         40, 40, 40, 255,     255, 255, 255, 255,
+
+        # Row 1
+         40, 40, 40, 255,     255, 255, 255, 255,
+        255, 255, 255, 255,   40, 40, 40, 255,
+
+        # Row 2
+        255, 255, 255, 255,   40, 40, 40, 255,
+         40, 40, 40, 255,     255, 255, 255, 255,
+
+        # Row 3
+         40, 40, 40, 255,     255, 255, 255, 255,
+        255, 255, 255, 255,   40, 40, 40, 255,
+    };
+
+    val texture_result: res[gfx.Texture, gfx.Error] = gfx.texture(
+        d,
+        ?pixels[0],
+        4,
+        4,
+        gfx.ColorSpace.srgb{},
+    );
+    if (sel texture_result.err) {
+        print.eprintlnf(
+            "Texture creation failed: {}",
+            gfx.error_message(texture_result.err),
+        );
+        gfx.mesh_delete(d, ?g.mesh);
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.texture = texture_result.ok;
+
+    # ============================================================
+    # Create Nearest Material
+    # ============================================================
+    #
+    # Nearest Filtering:
+    #
+    # The GPU directly takes the Texel closest to the current sample position.
+    #
+    # Therefore the checkerboard edges are relatively hard,
+    # and obvious pixel blocks remain visible after magnification.
+    g.material_nearest = gfx.material();
+
+    gfx.material_set_color(
+        ?g.material_nearest,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    val nearest_added: err[gfx.MaterialError] =
+        gfx.material_add_texture_filtered(
+            ?g.material_nearest,
+            "albedo",
+            ?g.texture,
+            gfx.TextureFilter.nearest{},
+        );
+    if (sel nearest_added.err) {
+        print.eprintlnf(
+            "Nearest texture binding failed: {}",
+            gfx.material_error_message(nearest_added.err),
+        );
+        gfx.texture_delete(d, ?g.texture);
+        gfx.mesh_delete(d, ?g.mesh);
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ============================================================
+    # Create Linear Material
+    # ============================================================
+    #
+    # Linear Filtering:
+    #
+    # The GPU interpolates based on the colors of nearby Texels.
+    #
+    # Interpolation:
+    #    Computes intermediate values between two or more known values.
+    #
+    # Therefore the checkerboard edges are not as hard as with Nearest,
+    # and smooth color transitions appear after magnification.
+    g.material_linear = gfx.material();
+
+    gfx.material_set_color(
+        ?g.material_linear,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    val linear_added: err[gfx.MaterialError] =
+        gfx.material_add_texture_filtered(
+            ?g.material_linear,
+            "albedo",
+            ?g.texture,
+            gfx.TextureFilter.linear{},
+        );
+    if (sel linear_added.err) {
+        print.eprintlnf(
+            "Linear texture binding failed: {}",
+            gfx.material_error_message(linear_added.err),
+        );
+        gfx.texture_delete(d, ?g.texture);
+        gfx.mesh_delete(d, ?g.mesh);
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ============================================================
+    # Create Perspective Camera
+    # ============================================================
+    #
+    # Camera provides:
+    #
+    #    View Matrix
+    #    Projection Matrix
+    val aspect: f32 = w::f32 / h::f32;
+
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 6.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # ============================================================
+    # Set up two Transforms
+    # ============================================================
+    #
+    # The two triangles use exactly the same Mesh.
+    #
+    # The only spatial difference:
+    #
+    #    Left  → Nearest
+    #    Right → Linear
+    #
+    # Because the Texture itself is also exactly the same,
+    # the final image difference comes from Filtering.
+    g.transform_nearest = gm.transform_identity();
+    g.transform_nearest.position = gm.vec3(
+        -1.7,
+        0.0,
+        0.0,
+    );
+
+    g.transform_linear = gm.transform_identity();
+    g.transform_linear.position = gm.vec3(
+        1.7,
+        0.0,
+        0.0,
+    );
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # This lesson does not rotate the triangles for now.
+    #
+    # Keeping the geometry and viewing conditions of both triangles exactly identical
+    # makes it easier to observe the difference between Nearest and Linear.
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Update Aspect Ratio after the window size changes.
+    g.camera.aspect = w / h;
+
+    # Begin the current Frame.
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame begin failed: {}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Scene Pass is responsible for 3D drawing.
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # Left side:
+    #
+    #    same Mesh
+    #    same Texture
+    #    Nearest Filtering
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material_nearest,
+        ?g.transform_nearest,
+    );
+
+    # Right side:
+    #
+    #    same Mesh
+    #    same Texture
+    #    Linear Filtering
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material_linear,
+        ?g.transform_linear,
+    );
+
+    gfx.pass_end(?pass);
+
+    # Submit the current Frame.
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame end failed: {}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # Material only stores a reference to the Texture.
+    # The Game truly owns the Texture GPU resource,
+    # so here the Game is responsible for releasing the Texture.
+    gfx.texture_delete(
+        d,
+        ?g.texture,
+    );
+
+    # Mesh is also a GPU resource.
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    # Set up App lifecycle callbacks.
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "Lesson 08: Texture Filtering",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    # Create Context.
+    val started: err[ContextError] = context_init(
+        ?ctx,
+        cfg,
+    );
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context initialization failed: {}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    # Give the Game state to the Context.
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    # Enter the Boom game loop.
+    val ran: res[i64, EngineError] = run(
+        ?ctx,
+        ?app,
+    );
+
+    # Shut down the Context.
+    val closed: err[ContextError] = context_shutdown(
+        ?ctx,
+    );
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context shutdown failed: {}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "Game loop failed: {}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

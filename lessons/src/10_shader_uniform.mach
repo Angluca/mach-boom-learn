@@ -1,0 +1,657 @@
+# Lesson 10: Shader Uniform and Custom Parameters
+#
+# This example studies:
+#
+# Uniform
+#    A small block of parameter data that a Shader receives from the game program.
+#
+# This lesson uses:
+#
+#    binding 4
+#
+# This is the location boom specifically reserves for a game's own Shader parameters.
+#
+# Compared with Lesson 09:
+#
+#    Lesson 09:
+#        The game provides its own Shader.
+#
+#    Lesson 10:
+#        The game not only provides the Shader,
+#        but can also pass different data to the Shader
+#        before each Draw.
+#
+# This example uses:
+#
+#    Params
+#      ├── colour
+#      └── control.x
+#
+# colour:
+#    The color used by the current triangle.
+#
+# control.x:
+#    The brightness of the current triangle.
+#
+# Two triangles:
+#
+#    Left:
+#        Brightness fixed at 1.0.
+#
+#    Right:
+#        Brightness changes over time.
+#
+# The two triangles have identical:
+#
+#    Mesh
+#    Material
+#    Shader
+#
+# The only difference is:
+#
+#    pass_set_user()
+#
+# passing different Params before each Draw.
+#
+# This can be understood as:
+#
+#    same Shader
+#          ↓
+#    different Uniform parameters
+#          ↓
+#    different final result
+#
+# ------------------------------------------------------------
+# Why does Params use Vec4?
+# ------------------------------------------------------------
+#
+# The Uniform Block at binding 4 uses the std140 layout.
+#
+# std140 is a standard memory layout rule for Vulkan Uniform Buffers.
+#
+# To make the CPU-side and GPU-side memory layouts exactly match,
+# this example directly uses two Vec4s:
+#
+#    colour  : Vec4
+#    control : Vec4
+#
+# This makes the layout very clear:
+#
+#    16 bytes
+#    +
+#    16 bytes
+#    =
+#    32 bytes
+#
+# Completely below boom's USER_BYTES = 256 bytes.
+#
+# ------------------------------------------------------------
+# Shader data flow
+# ------------------------------------------------------------
+#
+# Game:
+#
+#    Params
+#       ↓
+#    pass_set_user()
+#       ↓
+#    binding 4
+#       ↓
+#    Fragment Shader
+#       ↓
+#    Final color
+#
+# This lesson does not cover Storage Buffer for now.
+# Larger arrays and large amounts of GPU data will be studied separately later.
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+#[embed("{artifact.shader-lesson10_vert.out}")]
+val LESSON10_VERT_SPV: [_]u8;
+
+#[embed("{artifact.shader-lesson10_frag.out}")]
+val LESSON10_FRAG_SPV: [_]u8;
+
+
+# CPU-side Uniform parameters.
+#
+# Must keep exactly the same member order and data layout
+# as Params at binding 4 in the Shader.
+rec Params {
+    colour:  gm.Vec4;
+    control: gm.Vec4;
+}
+
+rec Game {
+    # Renderer manages the GPU, Swapchain, and Frame.
+    renderer: gfx.Renderer;
+
+    # The two triangles share the same Mesh.
+    mesh: gfx.Mesh;
+
+    # The two Draws share the same Material.
+    material: gfx.Material;
+
+    # The two Draws also share the same Shader.
+    shader: gfx.Shader;
+
+    # 3D Camera.
+    camera: gfx.Camera;
+
+    # The two triangles are at different positions.
+    transform_left: gm.Transform;
+    transform_right: gm.Transform;
+
+    # Uniform used by the left Draw.
+    params_left: Params;
+
+    # Uniform used by the right Draw.
+    params_right: Params;
+
+    # Animation time for the right triangle.
+    time: f32;
+
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer shutdown failed: {}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+    g.time = 0.0;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    # Initialize Renderer.
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer initialization failed: {}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # GPU resources are created using the Device owned by the Renderer.
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # ============================================================
+    # Create triangle Mesh
+    # ============================================================
+    #
+    # Standard 3D VertexFormat:
+    #
+    # Position 3
+    # Normal 3
+    # UV / TexCoord 2
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -1.0, -0.8, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         1.0, -0.8, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.8, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # Create Mesh.
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh creation failed: {}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # ============================================================
+    # Create Material
+    # ============================================================
+    #
+    # This lesson focuses on Shader Uniform,
+    # so Material does not handle color.
+    #
+    # The Shader directly uses colour from binding 4.
+    #
+    # Material can stay at its default here.
+    g.material = gfx.material();
+
+    # ============================================================
+    # Create custom Shader
+    # ============================================================
+    #
+    # gfx.shader() receives:
+    #
+    #    Vertex Shader
+    #    Fragment Shader
+    #
+    # The Shader itself only records two SPIR-V modules.
+    # The actual Pipeline is automatically created at Draw time based on:
+    #
+    #    Render Pass
+    #    VertexFormat
+    #
+    val shader_result: err[gfx.Error] = gfx.shader(
+        ?g.shader,
+        ?LESSON10_VERT_SPV[0],
+        $length_of(LESSON10_VERT_SPV),
+        ?LESSON10_FRAG_SPV[0],
+        $length_of(LESSON10_FRAG_SPV),
+    );
+    if (sel shader_result.err) {
+        print.eprintlnf(
+            "Shader creation failed: {}",
+            gfx.error_message(shader_result.err),
+        );
+        gfx.mesh_delete(
+            d,
+            ?g.mesh,
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ============================================================
+    # Create Camera
+    # ============================================================
+    #
+    # Camera provides:
+    #
+    #    View Matrix
+    #    Projection Matrix
+    val aspect: f32 = w::f32 / h::f32;
+
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 6.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # Left triangle.
+    g.transform_left = gm.transform_identity();
+    g.transform_left.position = gm.vec3(
+        -1.5,
+        0.0,
+        0.0,
+    );
+
+    # Right triangle.
+    g.transform_right = gm.transform_identity();
+    g.transform_right.position = gm.vec3(
+        1.5,
+        0.0,
+        0.0,
+    );
+
+    # ============================================================
+    # Initialize the two Uniform parameter blocks
+    # ============================================================
+    #
+    # Left:
+    #    Fixed green + 100% brightness.
+    g.params_left.colour = gm.vec4(
+        0.5,
+        1.0,
+        0.5,
+        1.0,
+    );
+    g.params_left.control = gm.vec4(
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    # Right:
+    #    Also uses green,
+    #    but control.x will change in Tick.
+    g.params_right.colour = gm.vec4(
+        0.5,
+        1.0,
+        0.5,
+        1.0,
+    );
+    g.params_right.control = gm.vec4(
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # Update time.
+    g.time = g.time + 0.02;
+
+    # Produce brightness from 0.25 to 1.0 based on time.
+    #
+    # sin ranges from:
+    #
+    #    -1.0 ~ 1.0
+    #
+    # Therefore:
+    #
+    #    sin(time) * 0.375 + 0.625
+    #
+    # gives:
+    #
+    #    0.25 ~ 1.0
+    val brightness: f32 =
+        gm.sinf(g.time) * 0.375 + 0.625;
+
+    g.params_right.control = gm.vec4(
+        brightness,
+        0.0,
+        0.0,
+        0.0,
+    );
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Update Camera aspect ratio after the window size changes.
+    g.camera.aspect = w / h;
+
+    # Begin Frame.
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame begin failed: {}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Scene Pass.
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # ============================================================
+    # First Draw
+    # ============================================================
+    #
+    # pass_set_user() sets the Uniform Block at binding 4.
+    #
+    # This parameter is copied into the uniform slot for "the next Draw".
+    #
+    # So what is passed here is:
+    #
+    #    params_left
+    #
+    val left_user: err[gfx.Error] = gfx.pass_set_user(
+        ?pass,
+        (?g.params_left):~*u8,
+        $size_of(Params),
+    );
+    if (sel left_user.err) {
+        print.eprintlnf(
+            "Left Shader parameter submission failed: {}",
+            gfx.error_message(left_user.err),
+        );
+        context_fail(ctx, 1);
+        gfx.pass_end(?pass);
+        ret;
+    }
+
+    gfx.pass_draw_shaded(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_left,
+        ?g.shader,
+    );
+
+    # ============================================================
+    # Second Draw
+    # ============================================================
+    #
+    # Reset binding 4 in the same Pass.
+    #
+    # Therefore the second Draw uses:
+    #
+    #    params_right
+    #
+    # This is a Per-draw Uniform.
+    val right_user: err[gfx.Error] = gfx.pass_set_user(
+        ?pass,
+        (?g.params_right):~*u8,
+        $size_of(Params),
+    );
+    if (sel right_user.err) {
+        print.eprintlnf(
+            "Right Shader parameter submission failed: {}",
+            gfx.error_message(right_user.err),
+        );
+        context_fail(ctx, 1);
+        gfx.pass_end(?pass);
+        ret;
+    }
+
+    gfx.pass_draw_shaded(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_right,
+        ?g.shader,
+    );
+
+    gfx.pass_end(?pass);
+
+    # Submit the current Frame.
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame end failed: {}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+
+    # If the Uniform Block exceeds USER_BYTES,
+    # boom records a refusal.
+    if (gfx.renderer_refused(?g.renderer) != 0) {
+        print.eprintln(
+            "Warning: Shader Uniform Block exceeded the allowed size",
+        );
+    }
+
+    # If a Draw itself failed to create a Pipeline or upload data,
+    # renderer_dropped() records the dropped Draw.
+    if (gfx.renderer_dropped(?g.renderer) != 0) {
+        print.eprintln(
+            "Warning: some Draw Calls were dropped by the Renderer",
+        );
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # The Shader created a Vulkan Pipeline,
+    # so it must be released before the Renderer shuts down.
+    gfx.shader_delete(
+        ?g.shader,
+        d,
+    );
+
+    # Mesh is a GPU resource.
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    # Set up App lifecycle callbacks.
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "Lesson 10: Shader Uniform",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    # Create Context.
+    val started: err[ContextError] = context_init(
+        ?ctx,
+        cfg,
+    );
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context initialization failed: {}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    # Give the Game state to the Context.
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    # Enter the Boom game loop.
+    val ran: res[i64, EngineError] = run(
+        ?ctx,
+        ?app,
+    );
+
+    # Shut down the Context.
+    val closed: err[ContextError] = context_shutdown(
+        ?ctx,
+    );
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context shutdown failed: {}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "Game loop failed: {}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

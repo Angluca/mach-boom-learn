@@ -1,0 +1,539 @@
+# Example 07 - Texture and UV
+#
+# This example studies two important 3D concepts:
+#
+# 1. Texture
+#    A texture is a 2D image that can be mapped onto a model's surface.
+#
+#    It can provide:
+#    color, patterns, detail, and other surface information.
+#
+# 2. UV / TexCoord
+#    UV tells the GPU:
+#
+#    "At this position on the model's surface,
+#     from which position in the Texture should color be taken?"
+#
+#    U usually represents the horizontal direction.
+#    V usually represents the vertical direction.
+#
+#    The most common range is:
+#
+#    U = 0.0 ~ 1.0
+#    V = 0.0 ~ 1.0
+#
+# This example does not read an external image.
+# Instead, it directly creates a 4×4 checkerboard texture in the program.
+#
+# This avoids extra problems such as image paths and resource files,
+# and keeps attention focused on:
+#
+#    Vertex
+#       ↓
+#    UV
+#       ↓
+#    Texture
+#       ↓
+#    Texture Sampling
+#       ↓
+#    final surface color
+#
+# This example continues using the Material from the previous lesson.
+#
+# Material's Base Color
+# is multiplied with the color sampled from the Texture.
+#
+# So it can be understood as:
+#
+#    Geometry
+#        +
+#    Transform
+#        +
+#    Material
+#        +
+#    Texture
+#        ↓
+#    final surface
+#
+# This example uses:
+#
+#    TextureFilter.nearest{}
+#
+# that is, Nearest Filtering.
+#
+# It selects the closest Texel,
+# and does not smoothly blend neighboring pixels,
+# so the checkerboard appears relatively sharp.
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    # Renderer manages the GPU, Swapchain, and Frame.
+    renderer: gfx.Renderer;
+
+    # Geometry data for the triangle.
+    mesh: gfx.Mesh;
+
+    # Independent GPU Texture resource.
+    texture: gfx.Texture;
+
+    # Material stores Base Color and Texture bindings.
+    material: gfx.Material;
+
+    # 3D Camera.
+    camera: gfx.Camera;
+
+    # The model's position, rotation, and scale in the world.
+    transform: gm.Transform;
+
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer shutdown failed: {}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    # Initialize Renderer.
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer initialization failed: {}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # GPU resources all need to use the Device owned by the Renderer.
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # Standard 3D vertex layout:
+    #
+    # Position 3
+    # Normal 3
+    # UV / TexCoord 2
+    #
+    # Each Vertex has 8 f32 values in total.
+    #
+    # The most important new content in this lesson is the last two UV values.
+    #
+    #    (0.0, 0.0) → bottom-left of Texture
+    #    (1.0, 0.0) → bottom-right of Texture
+    #    (0.5, 1.0) → top-center of Texture
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -1.0, -0.8, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         1.0, -0.8, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.8, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    # The triangle uses 3 Indices.
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # Create Mesh.
+    #
+    # ?vertices[0] is itself the vertex data pointer.
+    # ?indices[0] is itself *u32.
+    # No extra :~ type cast is needed.
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh creation failed: {}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # ============================================================
+    # Create a 4×4 checkerboard Texture
+    # ============================================================
+    #
+    # Texture uses RGBA8:
+    #
+    #    R G B A
+    #
+    # Each Texel occupies 4 u8 values.
+    #
+    # 4 × 4 is 16 Texels in total,
+    # so it needs:
+    #
+    #    16 × 4 = 64 u8 values
+    #
+    # White:
+    #
+    #    255, 255, 255, 255
+    #
+    # Dark gray:
+    #
+    #    40, 40, 40, 255
+    #
+    # After passing through the green Material Base Color,
+    # this produces a green and dark-green checkerboard effect.
+    var pixels: [64]u8 = [64]u8{
+        # Row 0
+        255, 255, 255, 255,   40, 40, 40, 255,
+         40, 40, 40, 255,     255, 255, 255, 255,
+
+        # Row 1
+         40, 40, 40, 255,     255, 255, 255, 255,
+        255, 255, 255, 255,   40, 40, 40, 255,
+
+        # Row 2
+        255, 255, 255, 255,   40, 40, 40, 255,
+         40, 40, 40, 255,     255, 255, 255, 255,
+
+        # Row 3
+         40, 40, 40, 255,     255, 255, 255, 255,
+        255, 255, 255, 255,   40, 40, 40, 255,
+    };
+
+    # texture() uploads RGBA8 pixels to the GPU.
+    #
+    # ColorSpace.srgb{}
+    # means this data belongs to sRGB (standard display color space).
+    val texture_result: res[gfx.Texture, gfx.Error] = gfx.texture(
+        d,
+        ?pixels[0],
+        4,
+        4,
+        gfx.ColorSpace.srgb{},
+    );
+    if (sel texture_result.err) {
+        print.eprintlnf(
+            "Texture creation failed: {}",
+            gfx.error_message(texture_result.err),
+        );
+        gfx.mesh_delete(d, ?g.mesh);
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.texture = texture_result.ok;
+
+    # ============================================================
+    # Create Material and bind Texture
+    # ============================================================
+    #
+    # Base Color uses the tutorial default green:
+    #
+    #    (0.5, 1.0, 0.5, 1.0)
+    #
+    # Alpha = 1.0 means fully opaque.
+    g.material = gfx.material();
+
+    gfx.material_set_color(
+        ?g.material,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    # Add the first texture to the Material.
+    #
+    # The current built-in Mesh Pipeline samples the first Texture of the Material.
+    #
+    # "albedo" is the name of this binding.
+    # It is mainly used for Material's own management and for later custom Shader lookup.
+    # The current built-in Pipeline actually uses the first texture.
+    #
+    # TextureFilter.nearest{}:
+    #    Nearest Filtering
+    #
+    # Does not smoothly blend neighboring Texels.
+    val added: err[gfx.MaterialError] = gfx.material_add_texture_filtered(
+        ?g.material,
+        "albedo",
+        ?g.texture,
+        gfx.TextureFilter.nearest{},
+    );
+    if (sel added.err) {
+        print.eprintlnf(
+            "Material texture binding failed: {}",
+            gfx.material_error_message(added.err),
+        );
+        gfx.texture_delete(d, ?g.texture);
+        gfx.mesh_delete(d, ?g.mesh);
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ============================================================
+    # Create Perspective Camera
+    # ============================================================
+    #
+    # Perspective Projection:
+    # objects farther away appear smaller.
+    #
+    # Camera provides:
+    #
+    #    View Matrix
+    #    Projection Matrix
+    val aspect: f32 = w::f32 / h::f32;
+
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 4.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # The model is located at the world origin.
+    g.transform = gm.transform_identity();
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # This lesson does not rotate the model yet.
+    #
+    # Keeping the model still makes it clearer to observe:
+    #
+    #    UV → Texture
+    #
+    # mapping relationship.
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Update Aspect Ratio after the window size changes.
+    g.camera.aspect = w / h;
+
+    # Begin the current Frame.
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame begin failed: {}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Scene Pass is responsible for 3D drawing.
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # Draw Call.
+    #
+    # Mesh:
+    #    provides vertices, Indices, and UVs.
+    #
+    # Material:
+    #    provides the green Base Color and Texture.
+    #
+    # Transform:
+    #    determines the model's position in World Space.
+    #
+    # Renderer will sample color from the Texture using UV.
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform,
+    );
+
+    gfx.pass_end(?pass);
+
+    # Submit the current Frame and Present it to the window.
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame end failed: {}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # Texture is a GPU resource.
+    # It must be released before the Renderer shuts down.
+    gfx.texture_delete(
+        d,
+        ?g.texture,
+    );
+
+    # Mesh is also a GPU resource.
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    # Set up App lifecycle callbacks.
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "Lesson 07: Texture and UV",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    # Create Context.
+    val started: err[ContextError] = context_init(
+        ?ctx,
+        cfg,
+    );
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context initialization failed: {}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    # Give the Game state to the Context.
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    # Enter the Boom game loop.
+    val ran: res[i64, EngineError] = run(
+        ?ctx,
+        ?app,
+    );
+
+    # Shut down the Context.
+    val closed: err[ContextError] = context_shutdown(
+        ?ctx,
+    );
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context shutdown failed: {}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "Game loop failed: {}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

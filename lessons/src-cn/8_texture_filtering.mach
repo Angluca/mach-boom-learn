@@ -1,0 +1,589 @@
+# Example 08 - Texture Filtering
+#
+# 本例学习 Texture Filtering（纹理过滤）。
+#
+# 当一张 Texture（纹理）和模型的大小刚好匹配时，
+# GPU 可以比较直接地读取对应的 Texel（纹理像素）。
+#
+# 但实际游戏中经常会遇到：
+#
+#    一张很小的 Texture
+#          ↓
+#    被放大到更大的屏幕区域
+#
+# 这时一个屏幕像素可能对应 Texture 中多个 Texel。
+# GPU 就需要决定：
+#
+#    “这些 Texel 应该怎么组合？”
+#
+# 这就是 Texture Filtering。
+#
+# 本课学习两种最基础的过滤方式：
+#
+# 1. Nearest Filtering（最近邻过滤）
+#    直接选择距离采样位置最近的 Texel。
+#
+#    优点：
+#    图像边缘清晰，像素感明显。
+#
+#    常用于：
+#    Pixel Art（像素画）等需要保持硬边的图像。
+#
+# 2. Linear Filtering（线性过滤）
+#    根据附近 Texel 的颜色进行插值，
+#    让颜色变化更加平滑。
+#
+#    优点：
+#    放大后的图像不会出现明显的方块跳变。
+#
+# 本例使用上一课的 4×4 棋盘 Texture，
+# 然后把同一张 Texture 放到两个三角形上：
+#
+#    左边：Nearest
+#    右边：Linear
+#
+# 两个三角形的：
+#
+#    Mesh
+#    UV
+#    Texture
+#    Transform
+#
+# 都相同。
+#
+# 唯一不同的是 Material 中的：
+#
+#    TextureFilter
+#
+# 因此我们可以把观察结果直接归因到：
+#
+#    Filtering
+#
+# 注意：
+#
+# 当前 boom 还没有生成 Mipmap（多级纹理），
+# 而且当前引擎还没有把纹理缩小时的完整 Mipmap 采样链路作为重点。
+# 所以本课主要观察：
+#
+#    Texture Magnification（纹理放大）
+#
+# 也就是：
+#
+#    很小的 Texture
+#         ↓
+#    被放大绘制
+#         ↓
+#    Nearest / Linear 的区别
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    # Renderer 管理 GPU、Swapchain（交换链）和 Frame（帧）。
+    renderer: gfx.Renderer;
+
+    # 两个三角形共用同一个 Mesh。
+    mesh: gfx.Mesh;
+
+    # 同一张 Texture 会被两个 Material 共同使用。
+    texture: gfx.Texture;
+
+    # 左边使用最近邻过滤。
+    material_nearest: gfx.Material;
+
+    # 右边使用线性过滤。
+    material_linear: gfx.Material;
+
+    # 3D Camera。
+    camera: gfx.Camera;
+
+    # 两个三角形使用不同的位置，
+    # 但几何数据完全相同。
+    transform_nearest: gm.Transform;
+    transform_linear: gm.Transform;
+
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer 关闭失败：{}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    # 初始化 Renderer。
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer 初始化失败：{}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # GPU 资源使用 Renderer 所属的 Device 创建。
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # ============================================================
+    # 创建三角形
+    # ============================================================
+    #
+    # 标准 3D 顶点布局：
+    #
+    # Position（位置）3
+    # Normal（法线）3
+    # UV / TexCoord（纹理坐标）2
+    #
+    # 本课真正关注的是最后两个 UV。
+    #
+    # 三角形的三个顶点分别对应：
+    #
+    #    (0.0, 0.0)
+    #    (1.0, 0.0)
+    #    (0.5, 1.0)
+    #
+    # 这表示整张 Texture 被映射到整个三角形。
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -1.2, -1.0, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+
+        # Vertex 1
+         1.2, -1.0, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+
+        # Vertex 2
+         0.0,  1.0, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # 创建 Mesh。
+    #
+    # 数组首元素本身已经可以作为对应的指针使用，
+    # 不需要额外的 :~ 类型转换。
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh 创建失败：{}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # ============================================================
+    # 创建 4×4 棋盘 Texture
+    # ============================================================
+    #
+    # 仍然使用程序生成的 Texture，
+    # 这样这一课只研究 Filtering，不需要增加图片资源管理。
+    var pixels: [64]u8 = [64]u8{
+        # Row 0
+        255, 255, 255, 255,   40, 40, 40, 255,
+         40, 40, 40, 255,     255, 255, 255, 255,
+
+        # Row 1
+         40, 40, 40, 255,     255, 255, 255, 255,
+        255, 255, 255, 255,   40, 40, 40, 255,
+
+        # Row 2
+        255, 255, 255, 255,   40, 40, 40, 255,
+         40, 40, 40, 255,     255, 255, 255, 255,
+
+        # Row 3
+         40, 40, 40, 255,     255, 255, 255, 255,
+        255, 255, 255, 255,   40, 40, 40, 255,
+    };
+
+    val texture_result: res[gfx.Texture, gfx.Error] = gfx.texture(
+        d,
+        ?pixels[0],
+        4,
+        4,
+        gfx.ColorSpace.srgb{},
+    );
+    if (sel texture_result.err) {
+        print.eprintlnf(
+            "Texture 创建失败：{}",
+            gfx.error_message(texture_result.err),
+        );
+        gfx.mesh_delete(d, ?g.mesh);
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.texture = texture_result.ok;
+
+    # ============================================================
+    # 创建 Nearest Material
+    # ============================================================
+    #
+    # Nearest Filtering（最近邻过滤）：
+    #
+    # GPU 直接取距离当前采样位置最近的 Texel。
+    #
+    # 因此棋盘边缘会比较硬，
+    # 放大之后仍然能看到明显的像素块。
+    g.material_nearest = gfx.material();
+
+    gfx.material_set_color(
+        ?g.material_nearest,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    val nearest_added: err[gfx.MaterialError] =
+        gfx.material_add_texture_filtered(
+            ?g.material_nearest,
+            "albedo",
+            ?g.texture,
+            gfx.TextureFilter.nearest{},
+        );
+    if (sel nearest_added.err) {
+        print.eprintlnf(
+            "Nearest 纹理绑定失败：{}",
+            gfx.material_error_message(nearest_added.err),
+        );
+        gfx.texture_delete(d, ?g.texture);
+        gfx.mesh_delete(d, ?g.mesh);
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ============================================================
+    # 创建 Linear Material
+    # ============================================================
+    #
+    # Linear Filtering（线性过滤）：
+    #
+    # GPU 会根据附近 Texel 的颜色进行插值。
+    #
+    # 插值（Interpolation）：
+    #    在两个或多个已知值之间计算中间值。
+    #
+    # 因此棋盘边缘不会像 Nearest 那么硬，
+    # 放大后会出现平滑的颜色过渡。
+    g.material_linear = gfx.material();
+
+    gfx.material_set_color(
+        ?g.material_linear,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    val linear_added: err[gfx.MaterialError] =
+        gfx.material_add_texture_filtered(
+            ?g.material_linear,
+            "albedo",
+            ?g.texture,
+            gfx.TextureFilter.linear{},
+        );
+    if (sel linear_added.err) {
+        print.eprintlnf(
+            "Linear 纹理绑定失败：{}",
+            gfx.material_error_message(linear_added.err),
+        );
+        gfx.texture_delete(d, ?g.texture);
+        gfx.mesh_delete(d, ?g.mesh);
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ============================================================
+    # 创建 Perspective Camera
+    # ============================================================
+    #
+    # Camera 提供：
+    #
+    #    View Matrix（视图矩阵）
+    #    Projection Matrix（投影矩阵）
+    val aspect: f32 = w::f32 / h::f32;
+
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 6.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # ============================================================
+    # 设置两个 Transform
+    # ============================================================
+    #
+    # 两个三角形使用完全相同的 Mesh。
+    #
+    # 唯一的空间区别：
+    #
+    #    左边 → Nearest
+    #    右边 → Linear
+    #
+    # 因为 Texture 本身也完全相同，
+    # 所以最终画面的差异来自 Filtering。
+    g.transform_nearest = gm.transform_identity();
+    g.transform_nearest.position = gm.vec3(
+        -1.7,
+        0.0,
+        0.0,
+    );
+
+    g.transform_linear = gm.transform_identity();
+    g.transform_linear.position = gm.vec3(
+        1.7,
+        0.0,
+        0.0,
+    );
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # 本课暂时不让三角形旋转。
+    #
+    # 保持两个三角形的几何和观察条件完全一致，
+    # 更容易观察 Nearest 与 Linear 的差别。
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Window 大小变化后更新 Aspect Ratio（宽高比）。
+    g.camera.aspect = w / h;
+
+    # 开始当前 Frame。
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame 开始失败：{}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Scene Pass（场景通道）负责 3D 绘制。
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # 左边：
+    #
+    #    同一个 Mesh
+    #    同一个 Texture
+    #    Nearest Filtering
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material_nearest,
+        ?g.transform_nearest,
+    );
+
+    # 右边：
+    #
+    #    同一个 Mesh
+    #    同一个 Texture
+    #    Linear Filtering
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material_linear,
+        ?g.transform_linear,
+    );
+
+    gfx.pass_end(?pass);
+
+    # 提交当前 Frame。
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame 结束失败：{}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # Material 只是保存对 Texture 的引用。
+    # 真正拥有 Texture GPU 资源的是 Game，
+    # 所以这里由 Game 负责释放 Texture。
+    gfx.texture_delete(
+        d,
+        ?g.texture,
+    );
+
+    # Mesh 同样是 GPU 资源。
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    # 设置 App 生命周期回调。
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "第 08 课：Texture Filtering",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    # 创建 Context。
+    val started: err[ContextError] = context_init(
+        ?ctx,
+        cfg,
+    );
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context 初始化失败：{}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    # 把 Game 状态交给 Context。
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    # 进入 Boom 游戏循环。
+    val ran: res[i64, EngineError] = run(
+        ?ctx,
+        ?app,
+    );
+
+    # 关闭 Context。
+    val closed: err[ContextError] = context_shutdown(
+        ?ctx,
+    );
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context 关闭失败：{}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "游戏循环失败：{}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

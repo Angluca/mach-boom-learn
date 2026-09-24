@@ -1,0 +1,81 @@
+# Lesson 09: Fragment Shader
+#
+# The Fragment Shader is responsible for deciding what color a Fragment finally writes.
+#
+# This lesson combines three things:
+#
+#    Texture
+#    Material Base Color
+#    UV
+#
+# and deliberately adds a simple UV Gradient,
+# so we can see very clearly that:
+#
+#    the Fragment Shader is indeed using logic we wrote ourselves.
+
+use tex: shader.texture;
+
+# Material's Base Color.
+#
+# binding 2 is the material color uniformly provided by boom.
+rec Base {
+    colour: f32x4;
+}
+
+# binding 1:
+# The first Texture of the Material.
+#[sampler(0, 1)]
+var albedo: tex.Sampler2D;
+
+# binding 2:
+# Material Base Color.
+#[uniform(0, 2)]
+var base: Base;
+
+# UV passed in after Vertex Shader interpolation.
+#[input(0)]
+var in_uv: f32x2;
+
+# Final output to the Color Attachment.
+#[output(0)]
+var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    # Generate a simple color gradient based on UV.
+    #
+    # The farther right U goes:
+    #    the stronger Red becomes
+    #
+    # The farther up V goes:
+    #    the stronger Blue becomes
+    #
+    # Green stays fixed at 0.5.
+    val gradient: f32x4 = f32x4{
+        in_uv[0],
+        0.5,
+        in_uv[1],
+        1.0,
+    };
+
+    # Sample from the Texture.
+    #
+    # Texture Sampling:
+    # Finds the color at the corresponding position in the Texture based on UV.
+    val texel: f32x4 = tex.sample_2d(
+        albedo,
+        in_uv,
+    );
+
+    # Final color:
+    #
+    #    Texture
+    #       ×
+    #    Material Base Color
+    #       ×
+    #    our own UV Gradient
+    #
+    # This is a Fragment Shader fully controlled by the game itself.
+    out_colour = texel * base.colour * gradient;
+}
+

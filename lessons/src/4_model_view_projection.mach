@@ -1,0 +1,388 @@
+# Example 04 - Model, View, Projection and MVP
+#
+# This example studies several important spaces and matrices in 3D rendering:
+#
+# Model Space
+#    The position where vertices are originally stored.
+#
+# Model Matrix
+#    Transforms the model from Model Space to World Space.
+#
+# World Space
+#    The actual coordinate space of the model in the game world.
+#
+# View Matrix
+#    Converts World Space into the Camera's view space.
+#
+# View Space
+#    The 3D space seen from the Camera's perspective.
+#
+# Projection Matrix
+#    Projects View Space into Clip Space.
+#
+# Clip Space
+#    The space used for subsequent clipping and perspective handling.
+#
+# NDC (Normalized Device Coordinates)
+#    Normalized coordinates after projection, later mapped to the screen.
+#
+# The whole process can be understood as:
+#
+#    Model Space
+#         ↓
+#    Model Matrix
+#         ↓
+#    World Space
+#         ↓
+#    View Matrix
+#         ↓
+#    View Space
+#         ↓
+#    Projection Matrix
+#         ↓
+#    Clip Space
+#         ↓
+#    NDC
+#         ↓
+#    Screen
+#
+# These matrices are usually collectively called MVP (Model-View-Projection).
+#
+# In current boom, the actual computation order is:
+#
+#    View-Projection = Projection × View
+#    MVP             = View-Projection × Model
+#
+# That is:
+#
+#    MVP = Projection × View × Model
+#
+# This example makes the triangle rotate back and forth around the Y axis between -60° and +60°,
+# so you can observe how the Model Transform affects the final model on screen.
+#
+# Here the model is temporarily not allowed to rotate fully to the back side,
+# to avoid Back-face Culling interfering with this lesson.
+# Back-face Culling will be studied specifically in Lesson 05.
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    renderer: gfx.Renderer;
+    mesh: gfx.Mesh;
+    material: gfx.Material;
+    camera: gfx.Camera;
+    transform: gm.Transform;
+    angle: f32;
+    forward: bool;
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer shutdown failed: {}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+    g.angle = 0.0;
+    g.forward = true;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer initialization failed: {}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # Standard 3D vertex layout:
+    #
+    # Position: 3 f32
+    # Normal: 3 f32
+    # UV / TexCoord: 2 f32
+    #
+    # Each Vertex has 8 f32 values in total.
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.9, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh creation failed: {}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # Use a uniform light green as the triangle color.
+    g.material = gfx.material();
+    gfx.material_set_color(
+        ?g.material,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    # Create a Perspective Camera.
+    #
+    # Camera provides the View Matrix and Projection Matrix.
+    val aspect: f32 = w::f32 / h::f32;
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 4.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # Transform controls the model's Position, Rotation, and Scale.
+    g.transform = gm.transform_identity();
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # Make the triangle rotate back and forth between -60° and +60°.
+    #
+    # An explicit direction variable is used here,
+    # instead of using sinf() to remap the current position into an angle,
+    # so the rotation logic is easier to understand.
+    if (g.forward) {
+        g.angle = g.angle + 0.02;
+        if (g.angle >= gm.radians(60.0)) {
+            g.angle = gm.radians(60.0);
+            g.forward = false;
+        }
+    }
+    or {
+        g.angle = g.angle - 0.02;
+        if (g.angle <= -gm.radians(60.0)) {
+            g.angle = -gm.radians(60.0);
+            g.forward = true;
+        }
+    }
+
+    # Rotate around the Y axis.
+    #
+    # This changes the Model Matrix,
+    # and therefore changes the model's position and orientation in World Space.
+    g.transform.rotation = gm.quat_from_axis_angle(
+        gm.vec3(0.0, 1.0, 0.0),
+        g.angle,
+    );
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Aspect Ratio participates in the Projection Matrix.
+    g.camera.aspect = w / h;
+
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame begin failed: {}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Scene Pass uses the 3D Camera.
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # Draw Call:
+    #
+    # The Mesh starts in Model Space,
+    # goes through the three transforms Model, View, and Projection,
+    # and finally reaches the screen.
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform,
+    );
+
+    gfx.pass_end(?pass);
+
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame end failed: {}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "Lesson 04: Model, View, Projection and MVP",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context initialization failed: {}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    val ran: res[i64, EngineError] = run(?ctx, ?app);
+
+    val closed: err[ContextError] = context_shutdown(?ctx);
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context shutdown failed: {}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "Game loop failed: {}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

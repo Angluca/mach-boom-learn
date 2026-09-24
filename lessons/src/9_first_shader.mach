@@ -1,0 +1,575 @@
+# Lesson 09: First Shader
+#
+# This lesson formally studies Shader for the first time.
+#
+# A Shader is a small program running on the GPU,
+# used to decide "how vertices are transformed" and "what the final pixel color is".
+#
+# This lesson mainly introduces two Shader Stages:
+#
+# 1. Vertex Shader
+#    Executes once per Vertex.
+#
+#    It is mainly responsible for:
+#
+#    Position transformation
+#    Vertex Attribute processing
+#    Passing data to the later Fragment Shader
+#
+# 2. Fragment Shader
+#    Executes for each Fragment that finally needs to be drawn.
+#
+#    It mainly decides what color this position finally outputs.
+#
+# It can be simply understood as:
+#
+#    Vertex
+#      ↓
+#    Vertex Shader
+#      ↓
+#    Triangle rasterization
+#      ↓
+#    Fragment Shader
+#      ↓
+#    Final color
+#
+# The left side of this lesson uses the default boom Shader.
+#
+# The right side uses our own Shader:
+#
+#    Vertex Shader:
+#       Continues to perform the normal MVP position transformation,
+#       while passing UV to the Fragment Shader.
+#
+#    Fragment Shader:
+#       Uses UV to generate a color gradient,
+#       then multiplies it with the Material's Base Color and Texture.
+#
+# So the two triangles:
+#
+#    Mesh        same
+#    Texture     same
+#    Material    same
+#    Transform   different
+#    Shader      different
+#
+# This makes it very intuitive to see:
+#
+#    The Shader decides "how the surface should be drawn".
+#
+# ------------------------------------------------------------
+# SPIR-V
+# ------------------------------------------------------------
+#
+# The current boom uses Vulkan.
+#
+# The Shader we write is not directly used as Mach source code at game runtime.
+#
+# The build process is:
+#
+#    Mach Shader Source
+#         ↓
+#    SPIR-V (Vulkan intermediate representation)
+#         ↓
+#    #[embed]
+#         ↓
+#    Game program
+#
+# So:
+#
+#    .mach Shader
+#         ↓
+#    compiled into .spv
+#         ↓
+#    gfx.shader()
+#
+# This lesson will modify:
+#
+#    1. src/9_first_shader.mach
+#    2. src/shaders/lesson9_vert.mach
+#    3. src/shaders/lesson9_frag.mach
+#    4. mach.toml
+#
+# ------------------------------------------------------------
+# Note
+# ------------------------------------------------------------
+#
+# The Vertex Input used by the Shader must match the Mesh's
+# VertexFormat.
+#
+# This lesson still uses:
+#
+#    Position(3)
+#    Normal(3)
+#    UV(2)
+#
+# That is, the standard 3D VertexFormat used from Lesson 3 to Lesson 8.
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+# ============================================================
+# Embed the two Shader compilation artifacts
+# ============================================================
+#
+# mach.toml will first compile:
+#
+#    shaders/lesson9_vert.mach
+#    shaders/lesson9_frag.mach
+#
+# into SPIR-V.
+#
+# #[embed] then embeds the generated .spv files directly into the final program.
+#
+# Therefore, no Shader files need to be read at runtime.
+#[embed("{artifact.shader-lesson9_vert.out}")]
+val LESSON9_VERT_SPV: [_]u8;
+
+#[embed("{artifact.shader-lesson9_frag.out}")]
+val LESSON9_FRAG_SPV: [_]u8;
+
+rec Game {
+    # Renderer manages the GPU, Swapchain, and Frame.
+    renderer: gfx.Renderer;
+
+    # The two triangles share the same Mesh.
+    mesh: gfx.Mesh;
+
+    # The same Material can also be used by both Shaders.
+    material: gfx.Material;
+
+    # The Shader we created ourselves.
+    shader: gfx.Shader;
+
+    # 3D Camera.
+    camera: gfx.Camera;
+
+    # The left side uses the default boom Shader.
+    transform_default: gm.Transform;
+
+    # The right side uses our own Shader.
+    transform_custom: gm.Transform;
+
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer shutdown failed: {}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    # Initialize Renderer.
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer initialization failed: {}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # GPU resources are created using the Device owned by the Renderer.
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # ============================================================
+    # Create standard 3D Mesh
+    # ============================================================
+    #
+    # Position 3
+    # Normal 3
+    # UV / TexCoord 2
+    #
+    # The Shader in this lesson still uses this VertexFormat.
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -1.0, -0.8, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         1.0, -0.8, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.8, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh creation failed: {}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # ============================================================
+    # Create Material
+    # ============================================================
+    #
+    # Use the tutorial default green:
+    #
+    #    (0.5, 1.0, 0.5, 1.0)
+    #
+    # Although this lesson focuses on Shader,
+    # Material still provides Base Color to the Shader.
+    g.material = gfx.material();
+
+    gfx.material_set_color(
+        ?g.material,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    # ============================================================
+    # Create custom Shader
+    # ============================================================
+    #
+    # gfx.shader() receives two SPIR-V modules:
+    #
+    #    Vertex Shader
+    #    Fragment Shader
+    #
+    # Creating the Shader does not immediately create a Vulkan Pipeline.
+    #
+    # Because the Pipeline also needs to know:
+    #
+    #    The current Render Pass
+    #    The current VertexFormat
+    #
+    # This information is not determined until the actual Draw.
+    val shader_result: err[gfx.Error] = gfx.shader(
+        ?g.shader,
+        ?LESSON9_VERT_SPV[0],
+        $length_of(LESSON9_VERT_SPV),
+        ?LESSON9_FRAG_SPV[0],
+        $length_of(LESSON9_FRAG_SPV),
+    );
+    if (sel shader_result.err) {
+        print.eprintlnf(
+            "Shader creation failed: {}",
+            gfx.error_message(shader_result.err),
+        );
+        gfx.mesh_delete(
+            d,
+            ?g.mesh,
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ============================================================
+    # Create Perspective Camera
+    # ============================================================
+    #
+    # Camera provides:
+    #
+    #    View Matrix
+    #    Projection Matrix
+    val aspect: f32 = w::f32 / h::f32;
+
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 6.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # Left: boom default Shader.
+    g.transform_default = gm.transform_identity();
+    g.transform_default.position = gm.vec3(
+        -1.6,
+        0.0,
+        0.0,
+    );
+
+    # Right: our custom Shader.
+    g.transform_custom = gm.transform_identity();
+    g.transform_custom.position = gm.vec3(
+        1.6,
+        0.0,
+        0.0,
+    );
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # This lesson keeps the model still for now.
+    #
+    # This focuses attention on:
+    #
+    #    Built-in Shader
+    #         vs
+    #    Custom Shader
+    #
+    # instead of also observing rotation.
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Update Camera aspect ratio after the window size changes.
+    g.camera.aspect = w / h;
+
+    # Begin Frame.
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame begin failed: {}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Scene Pass is responsible for 3D drawing.
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # ============================================================
+    # Left: boom default Shader
+    # ============================================================
+    #
+    # This is what has been used in previous lessons:
+    #
+    #    pass_draw_material()
+    #
+    # The built-in Boom Shader is responsible for:
+    #
+    #    MVP transformation
+    #    Normal
+    #    Texture Sampling
+    #    Default directional light
+    #    Material Base Color
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_default,
+    );
+
+    # ============================================================
+    # Right: our own Shader
+    # ============================================================
+    #
+    # The biggest difference between pass_draw_shaded() and the normal
+    # pass_draw_material() is the extra Shader at the end.
+    #
+    # Mesh, Material, and Transform are still present,
+    # but "how the final shading is done" is now decided by our Shader.
+    gfx.pass_draw_shaded(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_custom,
+        ?g.shader,
+    );
+
+    gfx.pass_end(?pass);
+
+    # Submit the current Frame.
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame end failed: {}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+
+    # The first time the custom Shader draws,
+    # boom may need to create the corresponding Pipeline.
+    #
+    # If a Draw is rejected due to resource/parameter issues,
+    # renderer_dropped() can help detect it,
+    # instead of letting the object silently disappear.
+    if (gfx.renderer_dropped(?g.renderer) != 0) {
+        print.eprintln("Warning: there are dropped Draw Calls");
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # Shader creates its own Vulkan Pipeline,
+    # so it is also a GPU resource that needs to be released.
+    gfx.shader_delete(
+        ?g.shader,
+        d,
+    );
+
+    # Mesh is a GPU resource.
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    # Set up App lifecycle callbacks.
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "Lesson 09: First Shader",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    # Create Context.
+    val started: err[ContextError] = context_init(
+        ?ctx,
+        cfg,
+    );
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context initialization failed: {}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    # Give the Game state to the Context.
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    # Enter the Boom game loop.
+    val ran: res[i64, EngineError] = run(
+        ?ctx,
+        ?app,
+    );
+
+    # Shut down the Context.
+    val closed: err[ContextError] = context_shutdown(
+        ?ctx,
+    );
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context shutdown failed: {}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "Game loop failed: {}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

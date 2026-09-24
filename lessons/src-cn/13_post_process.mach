@@ -1,0 +1,939 @@
+# 第13课：Post-processing（后处理）
+#
+# 第12课：
+#
+#     3D Scene
+#         ↓
+#     RenderTarget
+#         ↓
+#     Texture
+#         ↓
+#     Window
+#
+# 这一课继续使用第12课的两个三角形：
+#
+#     0 → 1 → 2：绿色正面
+#     0 → 2 → 1：红色背面
+#
+# 第一 Pass 不变：
+#
+#     Green / Red Triangle
+#             ↓
+#         RenderTarget
+#
+# 第二 Pass 不再直接把 Texture 原样显示出来。
+#
+# 而是：
+#
+#     RenderTarget Texture
+#             ↓
+#       Custom Shader（自定义着色器）
+#             ↓
+#        Post-processing
+#             ↓
+#           Window
+#
+# 本课的后处理效果：
+#
+#     0.0 → 原始颜色
+#     1.0 → 完全灰度
+#
+# amount 会在 0.0 ~ 1.0 之间来回变化，
+# 所以可以看到原图逐渐变成灰度，再逐渐恢复。
+#
+# 这一课真正要学的是：
+#
+#     Shader 不只可以负责“画一个物体”，
+#     也可以处理前一个 Pass 已经生成好的整张画面。
+
+use std.chrono.duration.SECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_shutdown;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+# ------------------------------------------------------------
+# 嵌入 Shader 编译后的 SPIR-V
+# ------------------------------------------------------------
+#
+# Shader 源码：
+#
+#     shaders/lesson13_vert.mach
+#     shaders/lesson13_frag.mach
+#
+# mach.toml 会把它们编译成 SPIR-V。
+#
+# #[embed(...)] 则把最终生成的二进制直接嵌入程序。
+#[embed("{artifact.shader-lesson13_vert.out}")]
+val POST_VERT_SPV: [_]u8;
+
+#[embed("{artifact.shader-lesson13_frag.out}")]
+val POST_FRAG_SPV: [_]u8;
+
+# ------------------------------------------------------------
+# Shader Uniform
+# ------------------------------------------------------------
+#
+# binding 4：
+#
+# 这是游戏自己的 Uniform Block（统一变量块）。
+#
+# 这里使用 f32x4，而不是单独一个 f32，
+# 是为了让这个 Block 与 std140 风格的布局保持简单明确。
+#
+# amount.x：
+#
+#     0.0 → 原始颜色
+#     1.0 → 完全灰度
+rec Params {
+    amount: f32x4;
+}
+
+rec Game {
+    renderer: gfx.Renderer;
+
+    # --------------------------------------------------------
+    # 第一 Pass
+    # --------------------------------------------------------
+    #
+    # 3D 场景先画到这里。
+    target: gfx.RenderTarget;
+
+    # 第12课的正面/背面三角形。
+    front_mesh: gfx.Mesh;
+    back_mesh: gfx.Mesh;
+
+    # 第12课的绿色/红色材质。
+    front_material: gfx.Material;
+    back_material: gfx.Material;
+
+    # 第一 Pass 的 3D Camera。
+    camera: gfx.Camera;
+
+    # 两个三角形共用同一个 Transform。
+    transform: gm.Transform;
+
+    # --------------------------------------------------------
+    # 第二 Pass
+    # --------------------------------------------------------
+    #
+    # 全屏 Quad（四边形）。
+    #
+    # RenderTarget Texture 会贴到这个 Quad 上，
+    # 再交给自定义 Fragment Shader 处理。
+    post_mesh: gfx.Mesh;
+
+    # 第一张 Texture 就是 RenderTarget 的 Color Texture。
+    post_material: gfx.Material;
+
+    # 第13课的自定义 Shader。
+    post_shader: gfx.Shader;
+
+    # Full-screen Quad 的 Transform。
+    post_transform: gm.Transform;
+
+    # --------------------------------------------------------
+    # 动画参数
+    # --------------------------------------------------------
+    angle: f32;
+
+    # 灰度量：
+    #
+    #     0.0 → 原图
+    #     1.0 → 灰度
+    gray_amount: f32;
+
+    # 灰度变化方向。
+    gray_forward: bool;
+
+    # binding 4 数据。
+    params: Params;
+
+    # --------------------------------------------------------
+    # 资源状态
+    # --------------------------------------------------------
+    #
+    # 初始化过程中如果中途失败，
+    # on_dnit 可以根据这些状态只释放已经创建的资源。
+    renderer_ok: bool;
+    target_ok: bool;
+    front_mesh_ok: bool;
+    back_mesh_ok: bool;
+    post_mesh_ok: bool;
+    shader_ok: bool;
+}
+
+fun on_init(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+    val device: *gfx.Device =
+        gfx.renderer_device(?game.renderer);
+
+    # ------------------------------------------------------------
+    # RenderTarget
+    # ------------------------------------------------------------
+    #
+    # 第一 Pass：
+    #
+    #     3D Scene → RenderTarget
+    #
+    # 继续使用第12课：
+    #
+    #     640 × 360
+    val target_result: res[gfx.RenderTarget, gfx.Error] =
+        gfx.render_target(device, 640, 360);
+
+    if (sel target_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.target = target_result.ok;
+    game.target_ok = true;
+
+    # ------------------------------------------------------------
+    # Triangle Vertex
+    # ------------------------------------------------------------
+    #
+    # Position（位置） = 3
+    # Normal（法线）   = 3
+    # UV（纹理坐标）   = 2
+    #
+    # 每个 Vertex 一共 8 个 f32。
+    var vertices: [24]f32 = [24]f32{
+        -1.0, -1.0, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+         1.0, -1.0, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+         0.0,  1.0, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0
+    };
+
+    # 正面：
+    #
+    #     0 → 1 → 2
+    var front_indices: [3]u32 =
+        [3]u32{0, 1, 2};
+
+    # 背面：
+    #
+    #     0 → 2 → 1
+    var back_indices: [3]u32 =
+        [3]u32{0, 2, 1};
+
+    val vertex_format: gfx.VertexFormat =
+        gfx.vertex_format_standard();
+
+    # ------------------------------------------------------------
+    # 正面 Mesh
+    # ------------------------------------------------------------
+    val front_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?vertices[0],
+            3,
+            ?vertex_format,
+            ?front_indices[0],
+            3
+        );
+
+    if (sel front_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.front_mesh = front_result.ok;
+    game.front_mesh_ok = true;
+
+    # ------------------------------------------------------------
+    # 背面 Mesh
+    # ------------------------------------------------------------
+    #
+    # Vertex 数据完全相同。
+    #
+    # 唯一的区别：
+    #
+    #     Index 顺序相反。
+    val back_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?vertices[0],
+            3,
+            ?vertex_format,
+            ?back_indices[0],
+            3
+        );
+
+    if (sel back_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.back_mesh = back_result.ok;
+    game.back_mesh_ok = true;
+
+    # ------------------------------------------------------------
+    # 正面 Material
+    # ------------------------------------------------------------
+    game.front_material = gfx.material();
+
+    gfx.material_set_color(
+        ?game.front_material,
+        gm.vec4(0.5, 1.0, 0.5, 1.0)
+    );
+
+    # ------------------------------------------------------------
+    # 背面 Material
+    # ------------------------------------------------------------
+    game.back_material = gfx.material();
+
+    gfx.material_set_color(
+        ?game.back_material,
+        gm.vec4(1.0, 0.2, 0.2, 1.0)
+    );
+
+    # ------------------------------------------------------------
+    # Camera
+    # ------------------------------------------------------------
+    #
+    # 第一 Pass：
+    #
+    #     RenderTarget = 640 × 360
+    #
+    # 所以 projection 的 aspect 使用：
+    #
+    #     640 / 360
+    game.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 4.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        640.0 / 360.0,
+        0.1,
+        100.0
+    );
+
+    # 两个三角形完全重合。
+    game.transform = gm.transform_identity();
+    game.transform.position = gm.vec3(0.0, 0.0, 0.5);
+
+    # ============================================================
+    # 创建 Post-processing Quad
+    # ============================================================
+    #
+    # 第二 Pass 的任务不再是画 Triangle。
+    #
+    # 我们需要一个覆盖整个 Window 的 Quad：
+    #
+    #     Texture
+    #        ↓
+    #       Quad
+    #        ↓
+    #    Fragment Shader
+    #        ↓
+    #      Window
+    #
+    # Quad 初始大小：
+    #
+    #     1 × 1
+    #
+    # 中心：
+    #
+    #     (0, 0)
+    #
+    # UV：
+    #
+    #     左下 = (0, 0)
+    #     右下 = (1, 0)
+    #     右上 = (1, 1)
+    #     左上 = (0, 1)
+    var post_vertices: [32]f32 = [32]f32{
+        -0.5, -0.5, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+         0.5, -0.5, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+         0.5,  0.5, 0.0,  0.0, 0.0, 1.0,  1.0, 1.0,
+        -0.5,  0.5, 0.0,  0.0, 0.0, 1.0,  0.0, 1.0
+    };
+
+    # 两个三角形组成 Quad。
+    var post_indices: [6]u32 = [6]u32{
+        0, 1, 2,
+        0, 2, 3
+    };
+
+    val post_mesh_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?post_vertices[0],
+            4,
+            ?vertex_format,
+            ?post_indices[0],
+            6
+        );
+
+    if (sel post_mesh_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.post_mesh = post_mesh_result.ok;
+    game.post_mesh_ok = true;
+
+    # ------------------------------------------------------------
+    # Post-processing Material
+    # ------------------------------------------------------------
+    #
+    # 从 RenderTarget 取得 Color Texture。
+    #
+    # 这个 Texture 就是 Fragment Shader 的输入。
+    val target_texture: *gfx.Texture =
+        gfx.render_target_texture(?game.target);
+
+    game.post_material = gfx.material();
+
+    # RenderTarget 是 640 × 360，
+    # Window 通常是 960 × 540。
+    #
+    # 放大场景时使用 Linear Filtering（线性过滤），
+    # 让缩放后的图像更平滑。
+    val texture_added: err[gfx.MaterialError] =
+        gfx.material_add_texture_filtered(
+            ?game.post_material,
+            "source",
+            target_texture,
+            gfx.TextureFilter.linear{}
+        );
+
+    if (sel texture_added.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # 创建 Custom Shader
+    # ------------------------------------------------------------
+    #
+    # Shader 由：
+    #
+    #     Vertex Shader
+    #     Fragment Shader
+    #
+    # 两个 SPIR-V module 组成。
+    #
+    # gfx.shader() 这里只保存 Shader module，
+    # 真正匹配 Render Pass + VertexFormat 的 Pipeline
+    # 会在第一次 pass_draw_shaded() 时由 boom 创建。
+    val shader_created: err[gfx.Error] =
+        gfx.shader(
+            ?game.post_shader,
+            ?POST_VERT_SPV[0],
+            $length_of(POST_VERT_SPV),
+            ?POST_FRAG_SPV[0],
+            $length_of(POST_FRAG_SPV)
+        );
+
+    if (sel shader_created.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.shader_ok = true;
+
+    # ------------------------------------------------------------
+    # Shader Pipeline State
+    # ------------------------------------------------------------
+    #
+    # Post-processing Quad 是 2D 几何：
+    #
+    #     不需要 Back-face Culling
+    #     不需要 Depth Test
+    #
+    # 所以自定义 Shader 使用 boom 的 2D PipelineDesc。
+    #
+    # 必须在第一次 draw 这个 Shader 之前设置，
+    # 因为 Vulkan Pipeline 会把这些固定功能状态一起编译进去。
+    gfx.shader_set_state(
+        ?game.post_shader,
+        gfx.pipeline_desc_2d()
+    );
+
+    # ------------------------------------------------------------
+    # 全屏 Quad Transform
+    # ------------------------------------------------------------
+    #
+    # Mesh 初始大小：
+    #
+    #     1 × 1
+    #
+    # 第二 Pass 使用 pixel-space Overlay：
+    #
+    #     Window = width × height
+    #
+    # 所以：
+    #
+    #     Scale：
+    #         (width, height)
+    #
+    #     Position：
+    #         (width / 2, height / 2)
+    #
+    # 这样 Quad 正好覆盖整个 Window。
+    game.post_transform =
+        gm.transform_identity();
+
+    # ------------------------------------------------------------
+    # Post-processing 参数
+    # ------------------------------------------------------------
+    game.gray_amount = 0.0;
+    game.gray_forward = true;
+
+    game.params.amount =
+        gm.vec4(
+            0.0,
+            0.0,
+            0.0,
+            0.0
+        );
+
+    game.angle = 0.0;
+}
+
+fun on_tick(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+
+    # ------------------------------------------------------------
+    # Triangle 旋转
+    # ------------------------------------------------------------
+    #
+    # 继续第12课：
+    #
+    #     正面 → 绿色
+    #     背面 → 红色
+    #
+    # 完整旋转 360°。
+    game.angle =
+        game.angle + 0.02;
+
+    if (game.angle >= gm.radians(360.0)) {
+        game.angle =
+            game.angle - gm.radians(360.0);
+    }
+
+    game.transform.rotation =
+        gm.quat_from_axis_angle(
+            gm.vec3(0.0, 1.0, 0.0),
+            game.angle
+        );
+
+    # ------------------------------------------------------------
+    # 灰度参数来回变化
+    # ------------------------------------------------------------
+    #
+    #     0.0 → 1.0
+    #     1.0 → 0.0
+    #
+    # 不使用 sin() 递归控制，
+    # 而是明确保存当前方向。
+    if (game.gray_forward) {
+        game.gray_amount =
+            game.gray_amount + 0.01;
+
+        if (game.gray_amount >= 1.0) {
+            game.gray_forward = false;
+        }
+    }
+    or {
+        game.gray_amount =
+            game.gray_amount - 0.01;
+
+        if (game.gray_amount <= 0.0) {
+            game.gray_forward = true;
+        }
+    }
+
+    # binding 4：
+    #
+    #     Params.amount
+    #
+    # Fragment Shader 每个像素都会读取这里的 amount。
+    game.params.amount =
+        gm.vec4(
+            game.gray_amount,
+            0.0,
+            0.0,
+            0.0
+        );
+}
+
+fun on_draw(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+
+    # ------------------------------------------------------------
+    # 开始 Frame
+    # ------------------------------------------------------------
+    val began: res[bool, gfx.Error] =
+        gfx.renderer_begin_frame(
+            ?game.renderer
+        );
+
+    if (sel began.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!began.ok) {
+        ret;
+    }
+
+    # 使用 Renderer 实际的 framebuffer 尺寸。
+    #
+    # 不直接读取 Window 尺寸，
+    # 因为 Vulkan Swapchain 的 framebuffer 尺寸才是
+    # 当前这一帧真正绘制的尺寸。
+    val width: f32 =
+        gfx.renderer_width(?game.renderer)::f32;
+
+    val height: f32 =
+        gfx.renderer_height(?game.renderer)::f32;
+
+    if (width <= 0.0 || height <= 0.0) {
+        val ended_empty: err[gfx.Error] =
+            gfx.renderer_end_frame(?game.renderer);
+        ret;
+    }
+
+    # 全屏 Quad：
+    #
+    #     position = Window 中心
+    #     scale    = Window 大小
+    game.post_transform.position =
+        gm.vec3(
+            width * 0.5,
+            height * 0.5,
+            0.0
+        );
+
+    game.post_transform.scale =
+        gm.vec3(
+            width,
+            height,
+            1.0
+        );
+
+    # ============================================================
+    # Pass 1：3D Scene → RenderTarget
+    # ============================================================
+    #
+    # 与第12课完全相同。
+    var scene: gfx.PassDesc =
+        gfx.pass_scene(?game.camera);
+
+    # 默认的 target 是 none：
+    #
+    #     none
+    #       ↓
+    #     默认 Window / Swapchain
+    #       ↓
+    #     直接显示到屏幕
+    #
+    # 指定 RenderTarget：
+    #
+    #     some{?game.target}
+    #       ↓
+    #     game.target
+    #       ↓
+    #     先离屏渲染
+    scene.target =
+        opt[*gfx.RenderTarget].some{?game.target};
+
+    var p1: gfx.Pass = gfx.pass_begin( ?game.renderer, ?scene);
+
+    # 正面：
+    #
+    #     0 → 1 → 2
+    #
+    # 绿色。
+    gfx.pass_draw_material(
+        ?p1,
+        ?game.front_mesh,
+        ?game.front_material,
+        ?game.transform
+    );
+
+    # 背面：
+    #
+    #     0 → 2 → 1
+    #
+    # 红色。
+    gfx.pass_draw_material(
+        ?p1,
+        ?game.back_mesh,
+        ?game.back_material,
+        ?game.transform
+    );
+
+    gfx.pass_end(?p1);
+
+    # ============================================================
+    # Pass 2：RenderTarget Texture → Custom Shader → Window
+    # ============================================================
+    #
+    # 第一 Pass 已经生成：
+    #
+    #     RenderTarget Color Texture
+    #
+    # 第二 Pass 把它作为 Material 的第一张 Texture。
+    #
+    # Material binding：
+    #
+    #     binding 1 → Texture
+    #
+    # Shader：
+    #
+    #     binding 4 → Params
+    var overlay: gfx.PassDesc =
+        gfx.pass_overlay();
+
+    # Full-screen Quad 没必要做 Frustum Culling（视锥体剔除）。
+    #
+    # 因为它本来就是为了覆盖整个 RenderTarget / Window，
+    # 不是普通场景里的一个 3D 物体。
+    overlay.cull = false;
+
+    var p2: gfx.Pass =
+        gfx.pass_begin(
+            ?game.renderer,
+            ?overlay
+        );
+
+    # ------------------------------------------------------------
+    # 设置 binding 4
+    # ------------------------------------------------------------
+    #
+    # pass_set_user() 的数据是当前 Pass 后续 Draw
+    # 使用的游戏 Uniform Block。
+    #
+    # Params 是：
+    #
+    #     f32x4 = 16 bytes
+    #
+    # 这里直接传 16 字节。
+    val params_ptr: *u8 =
+        (?game.params):~*u8;
+
+    val user_set: err[gfx.Error] =
+        gfx.pass_set_user(
+            ?p2,
+            params_ptr,
+            16
+        );
+
+    if (sel user_set.err) {
+        gfx.pass_end(?p2);
+
+        val ended_error: err[gfx.Error] =
+            gfx.renderer_end_frame(
+                ?game.renderer
+            );
+
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # 自定义 Shader Draw
+    # ------------------------------------------------------------
+    #
+    # pass_draw_shaded()：
+    #
+    #     Mesh
+    #     Material
+    #     Transform
+    #     Custom Shader
+    #
+    # Material 的第一张 Texture：
+    #
+    #     RenderTarget Color Texture
+    #
+    # Custom Fragment Shader：
+    #
+    #     读取 Texture
+    #     → 计算灰度
+    #     → 与原图混合
+    #     → 输出
+    gfx.pass_draw_shaded(
+        ?p2,
+        ?game.post_mesh,
+        ?game.post_material,
+        ?game.post_transform,
+        ?game.post_shader
+    );
+
+    gfx.pass_end(?p2);
+
+    # ------------------------------------------------------------
+    # 结束 Frame
+    # ------------------------------------------------------------
+    val ended: err[gfx.Error] =
+        gfx.renderer_end_frame(
+            ?game.renderer
+        );
+
+    if (sel ended.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val game: *Game =
+        context_user(ctx):~*Game;
+
+    if (game.renderer_ok) {
+        val device: *gfx.Device =
+            gfx.renderer_device(?game.renderer);
+
+        # Shader 的 Pipeline 是由 Shader 自己缓存的，
+        # 所以 Shader 必须在 Renderer 销毁前删除。
+        if (game.shader_ok) {
+            gfx.shader_delete(
+                ?game.post_shader,
+                device
+            );
+        }
+
+        if (game.post_mesh_ok) {
+            gfx.mesh_delete(
+                device,
+                ?game.post_mesh
+            );
+        }
+
+        if (game.back_mesh_ok) {
+            gfx.mesh_delete(
+                device,
+                ?game.back_mesh
+            );
+        }
+
+        if (game.front_mesh_ok) {
+            gfx.mesh_delete(
+                device,
+                ?game.front_mesh
+            );
+        }
+
+        if (game.target_ok) {
+            gfx.render_target_delete(
+                device,
+                ?game.target
+            );
+        }
+
+        val renderer_closed: err[gfx.Error] =
+            gfx.renderer_dnit(?game.renderer);
+
+        if (sel renderer_closed.err) {
+            context_fail(ctx, 1);
+        }
+    }
+
+    game.renderer_ok = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var ctx: Context;
+
+    val cfg: Config = Config{
+        width: 960,
+        height: 540,
+        title: "Lesson 13 - Post Processing",
+        fixed_dt: SECOND / 60,
+        max_frame: SECOND / 4,
+        frame_dt: 0,
+        mode: WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] =
+        context_init(
+            ?ctx,
+            cfg
+        );
+
+    if (sel started.err) {
+        ret 1;
+    }
+
+    var game: Game;
+
+    game.renderer_ok = false;
+    game.target_ok = false;
+    game.front_mesh_ok = false;
+    game.back_mesh_ok = false;
+    game.post_mesh_ok = false;
+    game.shader_ok = false;
+
+    # Context 自己持有 Window。
+    #
+    # renderer_init() 需要 *Window，
+    # 所以直接对 ctx.window 取地址。
+    val renderer_started: err[gfx.Error] =
+        gfx.renderer_init(
+            ?game.renderer,
+            ?ctx.window
+        );
+
+    if (sel renderer_started.err) {
+        context_shutdown(?ctx);
+        ret 1;
+    }
+
+    game.renderer_ok = true;
+
+    context_set_user(
+        ?ctx,
+        ?game
+    );
+
+    var app: App = App{
+        f_init: on_init,
+        f_tick: on_tick,
+        f_draw: on_draw,
+        f_dnit: on_dnit,
+    };
+
+    val ran: res[i64, EngineError] =
+        run(
+            ?ctx,
+            ?app
+        );
+
+    val closed: err[ContextError] =
+        context_shutdown(
+            ?ctx
+        );
+
+    if (sel closed.err) {
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

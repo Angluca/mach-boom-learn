@@ -1,0 +1,885 @@
+# Example 11 - Storage Buffer and Array Data
+#
+# This example studies Storage Buffer.
+#
+# In Lesson 10 we learned:
+#
+# Uniform
+#    A small amount of parameters related to the current Draw.
+#
+# For example:
+#
+#    colour
+#    brightness
+#    index
+#
+# Uniform currently has only limited space.
+# boom's User Uniform limit is:
+#
+#    256 bytes
+#
+# That is 16 Vec4s.
+#
+# When we need to pass a whole set of data to the Shader,
+# we should not cram all the data into Uniform.
+#
+# This is what Storage Buffer is for.
+#
+# ------------------------------------------------------------
+# Storage Buffer
+# ------------------------------------------------------------
+#
+# A Storage Buffer can be understood as:
+#
+#    A large block of array memory that the GPU can read.
+#
+# This lesson understands it as:
+#
+#    Game
+#      ↓
+#    32 colors
+#      ↓
+#    Storage Buffer
+#      ↓
+#    Shader
+#
+# The Shader then uses an index
+# to select the needed color from this array.
+#
+# ------------------------------------------------------------
+# Difference between Uniform and Storage Buffer
+# ------------------------------------------------------------
+#
+# Uniform:
+#
+#    A small amount of parameters
+#    Can be different for each Draw
+#    For example:
+#
+#        brightness
+#        colour
+#        index
+#
+# Storage Buffer:
+#
+#    A whole large set of data
+#    Shared by the entire Frame
+#    For example:
+#
+#        Light array
+#        Bone array
+#        Particle data
+#        Large color table
+#        Object data in the game world
+#
+# This example deliberately uses both together:
+#
+#    Uniform:
+#        Tells the Shader "which color I want".
+#
+#    Storage Buffer:
+#        Stores the actual color array.
+#
+# This makes it clear:
+#
+#    small parameters → Uniform
+#    large arrays → Storage Buffer
+#
+# ------------------------------------------------------------
+# Effect of this example
+# ------------------------------------------------------------
+#
+# We create 32 green-family colors:
+#
+#    color 0
+#    color 1
+#    ...
+#    color 31
+#
+# Then draw 4 identical triangles.
+#
+# The four Draws use:
+#
+#    index = 0
+#    index = 8
+#    index = 16
+#    index = 24
+#
+# Therefore:
+#
+#    Mesh       same
+#    Material   same
+#    Shader     same
+#    Texture    none
+#
+# The only difference is:
+#
+#    index in Uniform
+#
+# And the color itself comes from:
+#
+#    Storage Buffer
+#
+# ------------------------------------------------------------
+# Shader data flow
+# ------------------------------------------------------------
+#
+#    32 colors
+#        ↓
+#    renderer_storage_write()
+#        ↓
+#    binding 8
+#        ↓
+#    Shader
+#        ↑
+#    binding 4
+#        ↑
+#    index of the current Draw
+#
+# Finally:
+#
+#    palette[index]
+#        ↓
+#    Fragment Shader
+#        ↓
+#    final color
+#
+# This lesson does not yet study:
+#
+#    Point Light
+#    Complex structures in Storage Buffer
+#    Compute Shader
+#    GPU writing to Storage Buffer
+#
+# These will be added step by step later.
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+use std.types.size.usize;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+#[embed("{artifact.shader-lesson11_vert.out}")]
+val LESSON11_VERT_SPV: [_]u8;
+
+#[embed("{artifact.shader-lesson11_frag.out}")]
+val LESSON11_FRAG_SPV: [_]u8;
+
+# Uniform parameters.
+#
+# binding 4 uses this structure.
+#
+# control.x:
+#    The color index that the current Draw should read.
+rec Params {
+    control: gm.Vec4;
+}
+
+rec Game {
+    # Renderer manages the GPU, Swapchain, and Frame.
+    renderer: gfx.Renderer;
+
+    # The four triangles share the same Mesh.
+    mesh: gfx.Mesh;
+
+    # The four Draws share the same Material.
+    material: gfx.Material;
+
+    # The four Draws share the same Shader.
+    shader: gfx.Shader;
+
+    # 3D Camera.
+    camera: gfx.Camera;
+
+    # Positions of the four triangles.
+    transform_0: gm.Transform;
+    transform_1: gm.Transform;
+    transform_2: gm.Transform;
+    transform_3: gm.Transform;
+
+    # Uniform for each Draw.
+    params_0: Params;
+    params_1: Params;
+    params_2: Params;
+    params_3: Params;
+
+    # Color array in the Storage Buffer.
+    #
+    # 32 Vec4s:
+    #
+    #    32 × 16 bytes = 512 bytes
+    #
+    # This already exceeds User Uniform's 256 bytes,
+    # so a Storage Buffer is appropriate here.
+    palette: [32]gm.Vec4;
+
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer shutdown failed: {}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    # Initialize Renderer.
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer initialization failed: {}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # GPU resources use the Device owned by the Renderer.
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # Standard 3D vertex layout:
+    #
+    # Position 3
+    # Normal 3
+    # UV / TexCoord 2
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -0.65, -0.55, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         0.65, -0.55, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.00,  0.65, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # Create Mesh.
+    #
+    # The first element of the array is itself the corresponding data pointer,
+    # so no extra :~ type cast is needed.
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh creation failed: {}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # ============================================================
+    # Create Material
+    # ============================================================
+    #
+    # The Shader will directly use colors from the Storage Buffer,
+    # so Material uses white,
+    # without changing the colors provided by the Storage Buffer.
+    g.material = gfx.material();
+
+    gfx.material_set_color(
+        ?g.material,
+        gm.vec4(1.0, 1.0, 1.0, 1.0),
+    );
+
+    # ============================================================
+    # Create custom Shader
+    # ============================================================
+    val shader_result: err[gfx.Error] = gfx.shader(
+        ?g.shader,
+        ?LESSON11_VERT_SPV[0],
+        $length_of(LESSON11_VERT_SPV),
+        ?LESSON11_FRAG_SPV[0],
+        $length_of(LESSON11_FRAG_SPV),
+    );
+    if (sel shader_result.err) {
+        print.eprintlnf(
+            "Shader creation failed: {}",
+            gfx.error_message(shader_result.err),
+        );
+        gfx.mesh_delete(
+            d,
+            ?g.mesh,
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ============================================================
+    # Create color palette
+    # ============================================================
+    #
+    # The Storage Buffer stores 32 colors.
+    #
+    # This tutorial uses green triangles by default,
+    # so the whole palette stays in the green family.
+    #
+    # Each color has:
+    #
+    #    R
+    #    G
+    #    B
+    #    A
+    #
+    # For example:
+    #
+    #    (0.5, 1.0, 0.5, 1.0)
+    #
+    # is the default green of this tutorial.
+    var i: usize = 0;
+    for (i < 32) {
+        val t: f32 = i::f32 / 31.0;
+        val green: f32 = 0.45 + t * 0.55;
+
+        g.palette[i] = gm.vec4(
+            0.15 + t * 0.35,
+            green,
+            0.15 + t * 0.35,
+            1.0,
+        );
+
+        i = i + 1;
+    }
+
+    # ============================================================
+    # Reserve space for the Storage Buffer in advance
+    # ============================================================
+    #
+    # The Renderer will let the Storage Buffer grow automatically,
+    # but reserving in advance here can:
+    #
+    #    1. Prepare capacity during initialization.
+    #    2. Avoid resizing only on the first write of the first frame.
+    #    3. Ensure the array size declared in the Shader does not exceed Buffer Capacity.
+    #
+    # The Shader declares:
+    #
+    #    [32]f32x4
+    #
+    # So at least the following is needed:
+    #
+    #    32 × sizeof(Vec4)
+    #
+    val palette_bytes: usize =
+        32 * $size_of(gm.Vec4);
+
+    val reserved: err[gfx.Error] =
+        gfx.renderer_storage_reserve(
+            ?g.renderer,
+            palette_bytes,
+        );
+    if (sel reserved.err) {
+        print.eprintlnf(
+            "Storage Buffer Reserve failed: {}",
+            gfx.error_message(reserved.err),
+        );
+        gfx.shader_delete(
+            ?g.shader,
+            d,
+        );
+        gfx.mesh_delete(
+            d,
+            ?g.mesh,
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ============================================================
+    # Create Camera
+    # ============================================================
+    #
+    # Camera provides:
+    #
+    #    View Matrix
+    #    Projection Matrix
+    val aspect: f32 = w::f32 / h::f32;
+
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 6.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # ============================================================
+    # Positions of the four triangles
+    # ============================================================
+    #
+    # The four triangles use the same Mesh.
+    #
+    # They only differ in their positions in World Space.
+    g.transform_0 = gm.transform_identity();
+    g.transform_0.position = gm.vec3(
+        -1.6,
+        0.9,
+        0.0,
+    );
+
+    g.transform_1 = gm.transform_identity();
+    g.transform_1.position = gm.vec3(
+        1.6,
+        0.9,
+        0.0,
+    );
+
+    g.transform_2 = gm.transform_identity();
+    g.transform_2.position = gm.vec3(
+        -1.6,
+        -0.9,
+        0.0,
+    );
+
+    g.transform_3 = gm.transform_identity();
+    g.transform_3.position = gm.vec3(
+        1.6,
+        -0.9,
+        0.0,
+    );
+
+    # ============================================================
+    # Uniform for the four Draws
+    # ============================================================
+    #
+    # Uniform does not store the color itself.
+    #
+    # It only stores:
+    #
+    #    "Which color do I want to read from the Storage Buffer?"
+    #
+    # The four Draws read:
+    #
+    #    0
+    #    8
+    #    16
+    #    24
+    g.params_0.control = gm.vec4(
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    g.params_1.control = gm.vec4(
+        8.0,
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    g.params_2.control = gm.vec4(
+        16.0,
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    g.params_3.control = gm.vec4(
+        24.0,
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # This lesson does not make the triangles move for now.
+    #
+    # Keeping the geometry and Camera conditions of all Draws identical,
+    # only observes the relationship between Uniform Index and Storage Buffer.
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Update Camera aspect ratio after the window size changes.
+    g.camera.aspect = w / h;
+
+    # Begin Frame.
+    val br: res[bool, gfx.Error] =
+        gfx.renderer_begin_frame(
+            ?g.renderer,
+        );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame begin failed: {}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # ============================================================
+    # Write this frame's Storage Buffer
+    # ============================================================
+    #
+    # Note:
+    #
+    # Storage Buffer is Frame-level shared data,
+    # and must be written after renderer_begin_frame().
+    #
+    # Unlike Uniform:
+    #
+    # Uniform:
+    #    One can be set per Draw.
+    #
+    # Storage Buffer:
+    #    One is shared by the entire Frame.
+    #
+    # So it is written only once here.
+    #
+    # Reason for :~*u8:
+    #
+    # renderer_storage_write() receives a "byte data pointer".
+    # Here the memory of the Vec4 array is handed to it as a raw u8 data block,
+    # without changing the values inside.
+    val palette_bytes: usize = 32 * $size_of(gm.Vec4);
+    val wrote: err[gfx.Error] =
+        gfx.renderer_storage_write(
+            ?g.renderer,
+            (?g.palette[0]):~*u8,
+            palette_bytes,
+        );
+    if (sel wrote.err) {
+        print.eprintlnf(
+            "Storage Buffer write failed: {}",
+            gfx.error_message(wrote.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # Scene Pass.
+    var pass_desc: gfx.PassDesc =
+        gfx.pass_scene(?g.camera);
+
+    var pass: gfx.Pass =
+        gfx.pass_begin(
+            ?g.renderer,
+            ?pass_desc,
+        );
+
+    # ============================================================
+    # Draw 0
+    # ============================================================
+    #
+    # Uniform:
+    #    index = 0
+    #
+    # Storage Buffer:
+    #    stores all 32 colors.
+    val user_0: err[gfx.Error] =
+        gfx.pass_set_user(
+            ?pass,
+            (?g.params_0):~*u8,
+            $size_of(Params),
+        );
+    if (sel user_0.err) {
+        print.eprintln(
+            "Draw 0 Uniform submission failed",
+        );
+        gfx.pass_end(?pass);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    gfx.pass_draw_shaded(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_0,
+        ?g.shader,
+    );
+
+    # Draw 1:
+    # Only changes the index in Uniform.
+    val user_1: err[gfx.Error] =
+        gfx.pass_set_user(
+            ?pass,
+            (?g.params_1):~*u8,
+            $size_of(Params),
+        );
+    if (sel user_1.err) {
+        print.eprintln(
+            "Draw 1 Uniform submission failed",
+        );
+        gfx.pass_end(?pass);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    gfx.pass_draw_shaded(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_1,
+        ?g.shader,
+    );
+
+    # Draw 2.
+    val user_2: err[gfx.Error] =
+        gfx.pass_set_user(
+            ?pass,
+            (?g.params_2):~*u8,
+            $size_of(Params),
+        );
+    if (sel user_2.err) {
+        print.eprintln(
+            "Draw 2 Uniform submission failed",
+        );
+        gfx.pass_end(?pass);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    gfx.pass_draw_shaded(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_2,
+        ?g.shader,
+    );
+
+    # Draw 3.
+    val user_3: err[gfx.Error] =
+        gfx.pass_set_user(
+            ?pass,
+            (?g.params_3):~*u8,
+            $size_of(Params),
+        );
+    if (sel user_3.err) {
+        print.eprintln(
+            "Draw 3 Uniform submission failed",
+        );
+        gfx.pass_end(?pass);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    gfx.pass_draw_shaded(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_3,
+        ?g.shader,
+    );
+
+    gfx.pass_end(?pass);
+
+    # Submit and Present the current Frame.
+    val er: err[gfx.Error] =
+        gfx.renderer_end_frame(
+            ?g.renderer,
+        );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame end failed: {}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+
+    if (gfx.renderer_refused(?g.renderer) != 0) {
+        print.eprintln(
+            "Warning: some Uniform Block was refused",
+        );
+    }
+
+    if (gfx.renderer_dropped(?g.renderer) != 0) {
+        print.eprintln(
+            "Warning: some Draw Calls were dropped by the Renderer",
+        );
+    }
+
+    if (gfx.renderer_storage_refused(?g.renderer) != 0) {
+        print.eprintln(
+            "Warning: some Storage Buffer write was refused",
+        );
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game =
+        context_user(ctx)::*Game;
+
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device =
+        gfx.renderer_device(
+            ?g.renderer,
+        );
+
+    # Shader is a GPU resource.
+    gfx.shader_delete(
+        ?g.shader,
+        d,
+    );
+
+    # Mesh is a GPU resource.
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    # Set up App lifecycle callbacks.
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "Lesson 11: Storage Buffer",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    # Create Context.
+    val started: err[ContextError] =
+        context_init(
+            ?ctx,
+            cfg,
+        );
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context initialization failed: {}",
+            context_error_message(
+                started.err,
+            ),
+        );
+        ret 1;
+    }
+
+    # Give the Game state to the Context.
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    # Enter the Boom game loop.
+    val ran: res[i64, EngineError] =
+        run(
+            ?ctx,
+            ?app,
+        );
+
+    # Shut down the Context.
+    val closed: err[ContextError] =
+        context_shutdown(
+            ?ctx,
+        );
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context shutdown failed: {}",
+            context_error_message(
+                closed.err,
+            ),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "Game loop failed: {}",
+            engine_error_message(
+                ran.err,
+            ),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

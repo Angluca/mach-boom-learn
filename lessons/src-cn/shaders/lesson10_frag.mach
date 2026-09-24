@@ -1,0 +1,64 @@
+# 第 10 课：Fragment Shader（片段着色器）
+#
+# 本课最重要的新内容是：
+#
+#    #[uniform(0, 4)]
+#
+# binding 4 是游戏自己的 Uniform Block。
+#
+# CPU 端：
+#
+#    Params
+#        ↓
+#    pass_set_user()
+#
+# GPU 端：
+#
+#    binding 4
+#        ↓
+#    params
+#
+# 两边必须拥有相同的成员顺序和兼容的内存布局。
+
+rec Params {
+    # Triangle color（颜色）。
+    colour: f32x4;
+
+    # control.x：
+    #    当前亮度。
+    #
+    # 其它分量暂时不用。
+    control: f32x4;
+}
+
+# binding 4：
+# 游戏自己传入的 Shader 参数。
+#[uniform(0, 4)]
+var params: Params;
+
+# Vertex Shader 传来的 UV。
+#
+# 本课暂时不使用 UV，
+# 这里只保持完整的顶点接口结构。
+#[input(1)]
+var in_uv: f32x2;
+
+#[output(0)]
+var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    # 读取 CPU 通过 pass_set_user()
+    # 写入的 brightness。
+    val brightness: f32 = params.control[0];
+
+    # 用 Uniform 中的颜色 × Uniform 中的亮度
+    # 计算最终输出颜色。
+    out_colour = f32x4{
+        params.colour[0] * brightness,
+        params.colour[1] * brightness,
+        params.colour[2] * brightness,
+        params.colour[3],
+    };
+}
+

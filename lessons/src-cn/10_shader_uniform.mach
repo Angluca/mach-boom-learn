@@ -1,0 +1,660 @@
+# 第 10 课：Shader Uniform 与自定义参数
+#
+# 本例学习：
+#
+# Uniform（统一变量）
+#    Shader 从游戏程序接收的一小块参数数据。
+#
+# 本课使用的是：
+#
+#    binding 4
+#
+# 这是 boom 专门留给游戏自己 Shader 参数的位置。
+#
+# 和第 09 课相比：
+#
+#    第 09 课：
+#        游戏提供自己的 Shader。
+#
+#    第 10 课：
+#        游戏不仅提供 Shader，
+#        还可以在每次 Draw（绘制调用）之前，
+#        把不同的数据传给 Shader。
+#
+# 本例使用：
+#
+#    Params
+#      ├── colour
+#      └── control.x
+#
+# colour：
+#    当前三角形使用的颜色。
+#
+# control.x：
+#    当前三角形的亮度。
+#
+# 两个三角形：
+#
+#    左边：
+#        亮度固定为 1.0。
+#
+#    右边：
+#        亮度根据时间变化。
+#
+# 两个三角形的：
+#
+#    Mesh
+#    Material
+#    Shader
+#
+# 全部相同。
+#
+# 唯一不同的是：
+#
+#    pass_set_user()
+#
+# 在每个 Draw 前传入了不同的 Params。
+#
+# 这样可以理解成：
+#
+#    同一个 Shader
+#          ↓
+#    不同的 Uniform 参数
+#          ↓
+#    不同的最终结果
+#
+# ------------------------------------------------------------
+# 为什么 Params 使用 Vec4？
+# ------------------------------------------------------------
+#
+# binding 4 的 Uniform Block 使用 std140 布局。
+#
+# std140 是 Vulkan Uniform Buffer 的一种标准内存布局规则。
+#
+# 为了让 CPU 端和 GPU 端的内存布局完全一致，
+# 本例直接使用两个 Vec4：
+#
+#    colour  : Vec4
+#    control : Vec4
+#
+# 这样布局非常明确：
+#
+#    16 bytes
+#    +
+#    16 bytes
+#    =
+#    32 bytes
+#
+# 完全低于 boom 的 USER_BYTES = 256 bytes。
+#
+# ------------------------------------------------------------
+# Shader 数据流
+# ------------------------------------------------------------
+#
+# 游戏：
+#
+#    Params
+#       ↓
+#    pass_set_user()
+#       ↓
+#    binding 4
+#       ↓
+#    Fragment Shader
+#       ↓
+#    最终颜色
+#
+# 本课暂时不讲 Storage Buffer（存储缓冲）。
+# 更大的数组和大量 GPU 数据以后再单独学习。
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+#[embed("{artifact.shader-lesson10_vert.out}")]
+val LESSON10_VERT_SPV: [_]u8;
+
+#[embed("{artifact.shader-lesson10_frag.out}")]
+val LESSON10_FRAG_SPV: [_]u8;
+
+
+# CPU 端的 Uniform 参数。
+#
+# 必须和 Shader 中 binding 4 的 Params
+# 保持完全相同的成员顺序和数据布局。
+rec Params {
+    colour:  gm.Vec4;
+    control: gm.Vec4;
+}
+
+rec Game {
+    # Renderer 管理 GPU、Swapchain 和 Frame。
+    renderer: gfx.Renderer;
+
+    # 两个三角形共用同一个 Mesh。
+    mesh: gfx.Mesh;
+
+    # 两个 Draw 共用同一个 Material。
+    material: gfx.Material;
+
+    # 两个 Draw 也共用同一个 Shader。
+    shader: gfx.Shader;
+
+    # 3D Camera。
+    camera: gfx.Camera;
+
+    # 两个三角形的位置不同。
+    transform_left: gm.Transform;
+    transform_right: gm.Transform;
+
+    # 左边 Draw 使用的 Uniform。
+    params_left: Params;
+
+    # 右边 Draw 使用的 Uniform。
+    params_right: Params;
+
+    # 右边三角形的动画时间。
+    time: f32;
+
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer 关闭失败：{}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+    g.time = 0.0;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    # 初始化 Renderer。
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer 初始化失败：{}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # GPU 资源使用 Renderer 所属的 Device 创建。
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # ============================================================
+    # 创建三角形 Mesh
+    # ============================================================
+    #
+    # 标准 3D VertexFormat：
+    #
+    # Position（位置）3
+    # Normal（法线）3
+    # UV / TexCoord（纹理坐标）2
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -1.0, -0.8, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         1.0, -0.8, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.8, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # 创建 Mesh。
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh 创建失败：{}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # ============================================================
+    # 创建 Material
+    # ============================================================
+    #
+    # 本课重点是 Shader Uniform，
+    # 所以 Material 不负责颜色。
+    #
+    # Shader 会直接使用 binding 4 的 colour。
+    #
+    # Material 这里保持默认即可。
+    g.material = gfx.material();
+
+    # ============================================================
+    # 创建自定义 Shader
+    # ============================================================
+    #
+    # gfx.shader() 接收：
+    #
+    #    Vertex Shader（顶点着色器）
+    #    Fragment Shader（片段着色器）
+    #
+    # Shader 本身只是记录两个 SPIR-V 模块。
+    # 真正的 Pipeline 会在 Draw 时根据：
+    #
+    #    Render Pass
+    #    VertexFormat
+    #
+    # 自动建立。
+    val shader_result: err[gfx.Error] = gfx.shader(
+        ?g.shader,
+        ?LESSON10_VERT_SPV[0],
+        $length_of(LESSON10_VERT_SPV),
+        ?LESSON10_FRAG_SPV[0],
+        $length_of(LESSON10_FRAG_SPV),
+    );
+    if (sel shader_result.err) {
+        print.eprintlnf(
+            "Shader 创建失败：{}",
+            gfx.error_message(shader_result.err),
+        );
+        gfx.mesh_delete(
+            d,
+            ?g.mesh,
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ============================================================
+    # 创建 Camera
+    # ============================================================
+    #
+    # Camera 提供：
+    #
+    #    View Matrix（视图矩阵）
+    #    Projection Matrix（投影矩阵）
+    val aspect: f32 = w::f32 / h::f32;
+
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 6.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # 左边三角形。
+    g.transform_left = gm.transform_identity();
+    g.transform_left.position = gm.vec3(
+        -1.5,
+        0.0,
+        0.0,
+    );
+
+    # 右边三角形。
+    g.transform_right = gm.transform_identity();
+    g.transform_right.position = gm.vec3(
+        1.5,
+        0.0,
+        0.0,
+    );
+
+    # ============================================================
+    # 初始化两个 Uniform 参数块
+    # ============================================================
+    #
+    # 左边：
+    #    固定绿色 + 100% 亮度。
+    g.params_left.colour = gm.vec4(
+        0.5,
+        1.0,
+        0.5,
+        1.0,
+    );
+    g.params_left.control = gm.vec4(
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    # 右边：
+    #    同样使用绿色，
+    #    但 control.x 会在 Tick 中变化。
+    g.params_right.colour = gm.vec4(
+        0.5,
+        1.0,
+        0.5,
+        1.0,
+    );
+    g.params_right.control = gm.vec4(
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # 更新时间。
+    g.time = g.time + 0.02;
+
+    # 根据时间产生 0.25 ~ 1.0 的亮度。
+    #
+    # sin 的范围是：
+    #
+    #    -1.0 ~ 1.0
+    #
+    # 所以：
+    #
+    #    sin(time) * 0.375 + 0.625
+    #
+    # 会得到：
+    #
+    #    0.25 ~ 1.0
+    val brightness: f32 =
+        gm.sinf(g.time) * 0.375 + 0.625;
+
+    g.params_right.control = gm.vec4(
+        brightness,
+        0.0,
+        0.0,
+        0.0,
+    );
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Window 大小变化后更新 Camera 的宽高比。
+    g.camera.aspect = w / h;
+
+    # 开始 Frame。
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame 开始失败：{}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Scene Pass（场景通道）。
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # ============================================================
+    # 第一个 Draw
+    # ============================================================
+    #
+    # pass_set_user() 设置 binding 4 的 Uniform Block。
+    #
+    # 这个参数会被复制到“接下来这个 Draw”的 uniform slot。
+    #
+    # 所以这里传入的是：
+    #
+    #    params_left
+    #
+    val left_user: err[gfx.Error] = gfx.pass_set_user(
+        ?pass,
+        (?g.params_left):~*u8,
+        $size_of(Params),
+    );
+    if (sel left_user.err) {
+        print.eprintlnf(
+            "左侧 Shader 参数提交失败：{}",
+            gfx.error_message(left_user.err),
+        );
+        context_fail(ctx, 1);
+        gfx.pass_end(?pass);
+        ret;
+    }
+
+    gfx.pass_draw_shaded(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_left,
+        ?g.shader,
+    );
+
+    # ============================================================
+    # 第二个 Draw
+    # ============================================================
+    #
+    # 在同一个 Pass 中重新设置 binding 4。
+    #
+    # 因此第二个 Draw 使用的是：
+    #
+    #    params_right
+    #
+    # 这就是 Per-draw Uniform（每次绘制自己的参数）。
+    val right_user: err[gfx.Error] = gfx.pass_set_user(
+        ?pass,
+        (?g.params_right):~*u8,
+        $size_of(Params),
+    );
+    if (sel right_user.err) {
+        print.eprintlnf(
+            "右侧 Shader 参数提交失败：{}",
+            gfx.error_message(right_user.err),
+        );
+        context_fail(ctx, 1);
+        gfx.pass_end(?pass);
+        ret;
+    }
+
+    gfx.pass_draw_shaded(
+        ?pass,
+        ?g.mesh,
+        ?g.material,
+        ?g.transform_right,
+        ?g.shader,
+    );
+
+    gfx.pass_end(?pass);
+
+    # 提交当前 Frame。
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame 结束失败：{}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+
+    # 如果 Uniform Block 超过 USER_BYTES，
+    # boom 会记录一次 refused。
+    if (gfx.renderer_refused(?g.renderer) != 0) {
+        print.eprintln(
+            "警告：Shader Uniform Block 超出了允许大小",
+        );
+    }
+
+    # 如果 Draw 本身没有成功建立 Pipeline 或上传数据，
+    # renderer_dropped() 会记录被丢弃的 Draw。
+    if (gfx.renderer_dropped(?g.renderer) != 0) {
+        print.eprintln(
+            "警告：有 Draw Call 被 Renderer 丢弃",
+        );
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # Shader 创建了 Vulkan Pipeline，
+    # 所以必须在 Renderer 关闭之前释放。
+    gfx.shader_delete(
+        ?g.shader,
+        d,
+    );
+
+    # Mesh 是 GPU 资源。
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    # 设置 App 生命周期回调。
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "第 10 课：Shader Uniform",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    # 创建 Context。
+    val started: err[ContextError] = context_init(
+        ?ctx,
+        cfg,
+    );
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context 初始化失败：{}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    # 把 Game 状态交给 Context。
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    # 进入 Boom 游戏循环。
+    val ran: res[i64, EngineError] = run(
+        ?ctx,
+        ?app,
+    );
+
+    # 关闭 Context。
+    val closed: err[ContextError] = context_shutdown(
+        ?ctx,
+    );
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context 关闭失败：{}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "游戏循环失败：{}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

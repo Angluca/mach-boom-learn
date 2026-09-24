@@ -1,0 +1,85 @@
+# 第 10 课：Vertex Shader（顶点着色器）
+#
+# 这一阶段仍然使用标准 3D VertexFormat：
+#
+#    Position（位置）
+#    Normal（法线）
+#    UV / TexCoord（纹理坐标）
+#
+# 本课的重点不是改变顶点处理，
+# 所以 Vertex Shader 与第 09 课基本相同。
+
+rec Matrices {
+    mvp_0:   f32x4;
+    mvp_1:   f32x4;
+    mvp_2:   f32x4;
+    mvp_3:   f32x4;
+    model_0: f32x4;
+    model_1: f32x4;
+    model_2: f32x4;
+    model_3: f32x4;
+}
+
+# binding 0：
+# boom 提供 Model / View / Projection 所需要的矩阵数据。
+#[uniform(0, 0)]
+var matrices: Matrices;
+
+#[input(0)]
+var in_position: f32x3;
+
+#[input(1)]
+var in_normal: f32x3;
+
+#[input(2)]
+var in_uv: f32x2;
+
+#[output(0)]
+var out_normal: f32x3;
+
+#[output(1)]
+var out_uv: f32x2;
+
+#[builtin("position")]
+var position: f32x4;
+
+# 4×4 Matrix（矩阵）在 Mach Shader 中由四个 f32x4 列表示。
+#
+# Mat4 是 Column-major（列主序）。
+fun mul_point(
+    c0: f32x4,
+    c1: f32x4,
+    c2: f32x4,
+    c3: f32x4,
+    p: f32x4,
+) f32x4 {
+    ret c0 * f32x4{p[0], p[0], p[0], p[0]}
+        + c1 * f32x4{p[1], p[1], p[1], p[1]}
+        + c2 * f32x4{p[2], p[2], p[2], p[2]}
+        + c3 * f32x4{p[3], p[3], p[3], p[3]};
+}
+
+#[stage("vertex")]
+fun vert_main() {
+    val p: f32x4 = f32x4{
+        in_position[0],
+        in_position[1],
+        in_position[2],
+        1.0,
+    };
+
+    # Model → View → Projection。
+    position = mul_point(
+        matrices.mvp_0,
+        matrices.mvp_1,
+        matrices.mvp_2,
+        matrices.mvp_3,
+        p,
+    );
+
+    # 本课没有使用 Normal 光照，
+    # 仍然把它传下去保持标准 Vertex Shader 结构。
+    out_normal = in_normal;
+    out_uv = in_uv;
+}
+

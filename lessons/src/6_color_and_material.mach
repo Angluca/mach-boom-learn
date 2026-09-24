@@ -1,0 +1,491 @@
+# Example 06 - Color and Material
+#
+# This example studies two important concepts:
+#
+# 1. Color
+#    Represented with RGBA:
+#
+#    R = Red
+#    G = Green
+#    B = Blue
+#    A = Alpha
+#
+#    Color components in boom usually use 0.0 ~ 1.0:
+#
+#    0.0 = none
+#    1.0 = maximum
+#
+#    For example:
+#
+#    gm.vec4(1.0, 0.0, 0.0, 1.0)
+#
+#    represents fully opaque red.
+#
+# 2. Material
+#    Material describes the drawing parameters of a model's surface.
+#
+#    The current boom Material mainly stores:
+#
+#    base color
+#    texture bindings
+#
+#    This lesson only uses base color for now.
+#    Texture will be studied in later lessons.
+#
+# This example uses "the same Mesh + three Materials":
+#
+#    Left   red Material
+#    Middle green Material
+#    Right  blue Material
+#
+# The geometry data of the three triangles is completely identical,
+# only the Material used is different.
+#
+# This makes it possible to directly see a very important game engine design:
+#
+#    Geometry
+#          +
+#    Material
+#          ↓
+#    final surface appearance
+#
+# The same Mesh can be reused,
+# without duplicating geometry data for different colors.
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    # Renderer manages the GPU, Swapchain, and Frame.
+    renderer: gfx.Renderer;
+
+    # The three triangles share the same Mesh.
+    mesh: gfx.Mesh;
+
+    # Three Materials of different colors.
+    material_red: gfx.Material;
+    material_green: gfx.Material;
+    material_blue: gfx.Material;
+
+    # 3D Camera.
+    camera: gfx.Camera;
+
+    # Each triangle has its own Transform,
+    # so the same Mesh can be used but placed at different positions.
+    transform_red: gm.Transform;
+    transform_green: gm.Transform;
+    transform_blue: gm.Transform;
+
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer shutdown failed: {}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    # Initialize Renderer.
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer initialization failed: {}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # GPU resources need to use the Device owned by the Renderer.
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # Standard 3D vertex layout:
+    #
+    # Position 3
+    # Normal 3
+    # UV / TexCoord 2
+    #
+    # Each Vertex has 8 f32 values in total.
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -0.65, -0.55, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         0.65, -0.55, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.00,  0.65, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    # Triangle Indices.
+    #
+    # The three triangles use exactly the same geometry order.
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # Create only one Mesh.
+    #
+    # The three Draw Calls below will all reuse this one Mesh.
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh creation failed: {}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # ============================================================
+    # Create three Materials
+    # ============================================================
+    #
+    # Material's base_color is RGBA:
+    #
+    #    R G B A
+    #
+    # For example:
+    #
+    #    green = (0.5, 1.0, 0.5, 1.0)
+    #
+    # For now Alpha stays at 1.0, which means fully opaque.
+    # Transparent materials will be studied separately later.
+
+    # Left: red.
+    g.material_red = gfx.material();
+    gfx.material_set_color(
+        ?g.material_red,
+        gm.vec4(1.0, 0.2, 0.2, 1.0),
+    );
+
+    # Middle: green.
+    #
+    # This is the default triangle green used in this tutorial.
+    g.material_green = gfx.material();
+    gfx.material_set_color(
+        ?g.material_green,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    # Right: blue.
+    g.material_blue = gfx.material();
+    gfx.material_set_color(
+        ?g.material_blue,
+        gm.vec4(0.2, 0.5, 1.0, 1.0),
+    );
+
+    # ============================================================
+    # Create Camera
+    # ============================================================
+    #
+    # Camera uses Perspective Projection.
+    #
+    # Camera provides:
+    #
+    #    View Matrix
+    #    Projection Matrix
+    val aspect: f32 = w::f32 / h::f32;
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 5.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # ============================================================
+    # Create three Transforms
+    # ============================================================
+    #
+    # Transform determines the Mesh's:
+    #
+    #    Position
+    #    Rotation
+    #    Scale
+    #
+    # The three Transforms use the same Mesh,
+    # only moving them to the left, center, and right respectively.
+    g.transform_red = gm.transform_identity();
+    g.transform_red.position = gm.vec3(
+        -1.6,
+        0.0,
+        0.0,
+    );
+
+    g.transform_green = gm.transform_identity();
+    g.transform_green.position = gm.vec3(
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    g.transform_blue = gm.transform_identity();
+    g.transform_blue.position = gm.vec3(
+        1.6,
+        0.0,
+        0.0,
+    );
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # This lesson does not make the triangles move yet.
+    #
+    # The focus is observing:
+    #
+    #    One Mesh
+    #       +
+    #    three different Materials
+    #       ↓
+    #    three different appearances
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Update the Camera's Aspect Ratio after the window size changes.
+    g.camera.aspect = w / h;
+
+    # Begin the current Frame.
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame begin failed: {}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Scene Pass is responsible for 3D drawing.
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # ============================================================
+    # Draw three triangles of different colors using the same Mesh
+    # ============================================================
+    #
+    # Here the three Draw Calls use:
+    #
+    #    same Mesh
+    #    different Material
+    #    different Transform
+    #
+    # Therefore:
+    #
+    #    Geometry determines "shape"
+    #    Transform determines "where"
+    #    Material determines "how the surface is drawn"
+    #
+    # This is a very important resource reuse pattern in modern game engines.
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material_red,
+        ?g.transform_red,
+    );
+
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material_green,
+        ?g.transform_green,
+    );
+
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material_blue,
+        ?g.transform_blue,
+    );
+
+    gfx.pass_end(?pass);
+
+    # Submit and Present the current Frame.
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame end failed: {}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # The three Materials are only CPU-side material descriptions,
+    # with no independent GPU resources to delete like a Mesh.
+    #
+    # Mesh is a GPU resource, so it must be released on exit.
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    # Set up App lifecycle callbacks.
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "Lesson 06: Color and Material",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    # If context_init() returns an error,
+    # it means Context initialization failed.
+    val started: err[ContextError] = context_init(
+        ?ctx,
+        cfg,
+    );
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context initialization failed: {}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    # Give the Game state to the Context.
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    # Enter the Boom game loop.
+    val ran: res[i64, EngineError] = run(
+        ?ctx,
+        ?app,
+    );
+
+    # Shut down the Context.
+    val closed: err[ContextError] = context_shutdown(
+        ?ctx,
+    );
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context shutdown failed: {}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "Game loop failed: {}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

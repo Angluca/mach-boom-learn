@@ -1,0 +1,652 @@
+# Lesson 12: Render Target (Offscreen Rendering) and Multi-Pass Rendering
+#
+# In previous lessons, we always drew the scene directly to the Window:
+#
+#     Mesh → Pass → Window
+#
+# This lesson separates the drawing target:
+#
+#     Pass 1:
+#         Triangle → RenderTarget
+#
+#     Pass 2:
+#         RenderTarget Texture → Window
+#
+# RenderTarget
+#     The target the GPU uses to receive rendering results.
+#
+# Offscreen Rendering
+#     Not drawing directly to the Window, but first drawing to a RenderTarget.
+#
+# Multi-Pass Rendering
+#     Executing multiple Passes in the same frame, letting later Passes continue
+#     using the results of the previous Pass.
+#
+# This lesson continues using the Winding Order example from Lesson 5:
+#
+#     Front triangle: 0 → 1 → 2, green
+#     Back triangle:  0 → 2 → 1, red
+#
+# The two triangles have exactly the same position and rotation,
+# only the Index order is reversed.
+#
+# The Renderer enables Back-face Culling by default:
+#
+#     Front facing Camera → green triangle visible
+#     Back facing Camera  → green culled, red triangle visible
+#
+# So during a full rotation:
+#
+#     green → side → red → side → green
+#
+# At the same time, these two triangles are not drawn directly to the Window,
+# but first drawn to a 640 × 360 RenderTarget,
+# and then the second Pass displays the RenderTarget's Texture
+# at the center of the 960 × 540 Window.
+
+use std.chrono.duration.SECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_shutdown;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+rec Game {
+    renderer: gfx.Renderer;
+
+    # Drawing target for the first Pass.
+    #
+    # Both triangles are drawn here first:
+    #
+    #     Green Triangle
+    #          +
+    #      Red Triangle
+    #          ↓
+    #      RenderTarget
+    target: gfx.RenderTarget;
+
+    # Mesh for the front green triangle.
+    front_mesh: gfx.Mesh;
+
+    # Mesh for the back red triangle.
+    #
+    # It uses exactly the same Vertex data as front_mesh,
+    # only the Index order is reversed.
+    back_mesh: gfx.Mesh;
+
+    # Front green material.
+    front_material: gfx.Material;
+
+    # Back red material.
+    back_material: gfx.Material;
+
+    # 3D Camera used by the first Pass.
+    camera: gfx.Camera;
+
+    # Both triangles share the same Transform.
+    transform: gm.Transform;
+
+    # Current rotation angle.
+    angle: f32;
+
+    # Whether GPU resources are ready.
+    ready: bool;
+}
+
+fun on_init(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+    val device: *gfx.Device = gfx.renderer_device(?game.renderer);
+
+    # ------------------------------------------------------------
+    # Create RenderTarget
+    # ------------------------------------------------------------
+    #
+    # Window:
+    #
+    #     960 × 540
+    #
+    # RenderTarget:
+    #
+    #     640 × 360
+    #
+    # Both keep the same aspect ratio.
+    #
+    # The first Pass writes the complete 3D image into the RenderTarget.
+    val target_result: res[gfx.RenderTarget, gfx.Error] =
+        gfx.render_target(device, 640, 360);
+
+    if (sel target_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.target = target_result.ok;
+
+    # ------------------------------------------------------------
+    # Vertex data
+    # ------------------------------------------------------------
+    #
+    # Both triangles use exactly the same three Vertices:
+    #
+    #         2
+    #        / \
+    #       /   \
+    #      0-----1
+    #
+    # Position = 3 × f32
+    # Normal   = 3 × f32
+    # UV       = 2 × f32
+    #
+    # This lesson does not use textures, but keeps the standard Vertex format,
+    # to keep the Mesh consistent with previous lessons.
+    var vertices: [24]f32 = [24]f32{
+        -2.0, -2.0, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+         2.0, -2.0, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+         0.0,  2.0, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0
+    };
+
+    # ------------------------------------------------------------
+    # Two sets of Indices
+    # ------------------------------------------------------------
+    #
+    # front_indices:
+    #
+    #     0 → 1 → 2
+    #
+    # This is the front-face winding order.
+    #
+    # back_indices:
+    #
+    #     0 → 2 → 1
+    #
+    # Completely opposite to the front, so it is identified as a back face.
+    #
+    # With Back-face Culling enabled in the Renderer,
+    # only the face toward the Camera remains visible at a given rotation angle.
+    var front_indices: [3]u32 = [3]u32{0, 1, 2};
+    var back_indices: [3]u32 = [3]u32{0, 2, 1};
+
+    # vertex_format_standard() returns a VertexFormat value.
+    val vertex_format: gfx.VertexFormat =
+        gfx.vertex_format_standard();
+
+    # ------------------------------------------------------------
+    # Create front Mesh
+    # ------------------------------------------------------------
+    val front_mesh_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?vertices[0],
+            3,
+            ?vertex_format,
+            ?front_indices[0],
+            3
+        );
+
+    if (sel front_mesh_result.err) {
+        gfx.render_target_delete(device, ?game.target);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.front_mesh = front_mesh_result.ok;
+
+    # ------------------------------------------------------------
+    # Create back Mesh
+    # ------------------------------------------------------------
+    #
+    # The Vertex data is exactly the same,
+    # only the Index order changes.
+    val back_mesh_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?vertices[0],
+            3,
+            ?vertex_format,
+            ?back_indices[0],
+            3
+        );
+
+    if (sel back_mesh_result.err) {
+        gfx.mesh_delete(device, ?game.front_mesh);
+        gfx.render_target_delete(device, ?game.target);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.back_mesh = back_mesh_result.ok;
+
+    # ------------------------------------------------------------
+    # Create two Materials
+    # ------------------------------------------------------------
+    #
+    # The geometry positions are exactly the same,
+    # so different Materials are used to distinguish which face is currently visible.
+    game.front_material = gfx.material();
+    game.back_material = gfx.material();
+
+    # Front: green.
+    gfx.material_set_color(
+        ?game.front_material,
+        gm.vec4(0.5, 1.0, 0.5, 1.0)
+    );
+
+    # Back: red.
+    gfx.material_set_color(
+        ?game.back_material,
+        gm.vec4(1.0, 0.2, 0.2, 1.0)
+    );
+
+    # ------------------------------------------------------------
+    # Create Camera
+    # ------------------------------------------------------------
+    #
+    # Camera is at:
+    #
+    #     (0, 0, 4)
+    #
+    # looking at:
+    #
+    #     (0, 0, 0)
+    #
+    # The first Pass's RenderTarget is 640 × 360,
+    # so 640 / 360 is used as the aspect.
+    game.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 4.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        640.0 / 360.0,
+        0.1,
+        100.0
+    );
+
+    # ------------------------------------------------------------
+    # Create Transform
+    # ------------------------------------------------------------
+    #
+    # Both triangles share the same Transform.
+    #
+    # Therefore:
+    #
+    #     green triangle
+    #     red triangle
+    #
+    # always overlap completely.
+    game.transform = gm.transform_identity();
+    game.transform.position = gm.vec3(0.0, 0.0, -2.0);
+
+    game.angle = 0.0;
+    game.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+
+    if (!game.ready) {
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # Rotate around the Y axis
+    # ------------------------------------------------------------
+    #
+    # This lesson deliberately rotates a full 360°.
+    #
+    # Observation process:
+    #
+    #     0°:
+    #         front → green
+    #
+    #     90°:
+    #         nearly side-on → triangle almost invisible
+    #
+    #     180°:
+    #         back → red
+    #
+    #     270°:
+    #         nearly side-on again
+    #
+    #     360°:
+    #         back to front → green
+    game.angle = game.angle + 0.02;
+
+    if (game.angle >= gm.radians(360.0)) {
+        game.angle = game.angle - gm.radians(360.0);
+    }
+
+    game.transform.rotation = gm.quat_from_axis_angle(
+        gm.vec3(0.0, 1.0, 0.0),
+        game.angle
+    );
+}
+
+fun on_draw(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+
+    if (!game.ready) {
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # Begin Frame
+    # ------------------------------------------------------------
+    #
+    # Current boom's renderer_begin_frame() returns:
+    #
+    #     res[bool, gfx.Error]
+    #
+    # err:
+    #     Frame begin failed.
+    #
+    # ok == false:
+    #     No Frame was actually opened,
+    #     just skip this frame.
+    val began: res[bool, gfx.Error] =
+        gfx.renderer_begin_frame(?game.renderer);
+
+    if (sel began.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!began.ok) {
+        ret;
+    }
+
+    # ============================================================
+    # Pass 1: 3D Scene → RenderTarget
+    # ============================================================
+    #
+    # The first Pass does not display directly to the Window,
+    # but draws the entire 3D scene to game.target.
+    var scene: gfx.PassDesc =
+        gfx.pass_scene(?game.camera);
+
+    # PassDesc.target determines this Pass's "output target",
+    # that is, where the color result is finally written after this round of drawing completes.
+    #
+    # If target does not specify a RenderTarget:
+    #
+    #     target = none
+    #
+    # then the default Window / Swapchain is used as the output target,
+    # which means displaying the image directly on screen.
+    #
+    # But here:
+    #
+    #     ?game.target
+    #
+    # gets the address of game.target:
+    #
+    #     *RenderTarget
+    #
+    # Then:
+    #
+    #     opt[*gfx.RenderTarget].some{...}
+    #
+    # assigns this RenderTarget to target.
+    #
+    # So after this line executes:
+    #
+    #     Mesh → current Pass → game.target
+    #
+    # instead of:
+    #
+    #     Mesh → current Pass → Window
+    #
+    # In other words, the image is first written to the RenderTarget,
+    # and is not displayed directly on screen yet.
+    #
+    # After the first Pass completes, we can still obtain its Color Texture
+    # through render_target_texture(),
+    # and then have the second Pass display this Texture on the Window.
+    scene.target =
+        opt[*gfx.RenderTarget].some{?game.target};
+
+    var p1: gfx.Pass =
+        gfx.pass_begin(?game.renderer, ?scene);
+
+    # ------------------------------------------------------------
+    # Draw the front Mesh first
+    # ------------------------------------------------------------
+    #
+    # Its Index:
+    #
+    #     0 → 1 → 2
+    #
+    # Uses the green Material.
+    #
+    # When this face is toward the Camera:
+    #
+    #     Back-face Culling does not cull it
+    #     → green triangle appears
+    gfx.pass_draw_material(
+        ?p1,
+        ?game.front_mesh,
+        ?game.front_material,
+        ?game.transform
+    );
+
+    # ------------------------------------------------------------
+    # Then draw the reversed Mesh
+    # ------------------------------------------------------------
+    #
+    # Its Index:
+    #
+    #     0 → 2 → 1
+    #
+    # Uses the red Material.
+    #
+    # When the green triangle rotates to the back,
+    # the green Mesh is culled by Back-face Culling,
+    # and at this point the red Mesh's face is exactly toward the Camera:
+    #
+    #     → red triangle appears
+    #
+    # So the "red" is not switched by the CPU judging the angle,
+    # but truly utilizes the GPU's Back-face Culling.
+    gfx.pass_draw_material(
+        ?p1,
+        ?game.back_mesh,
+        ?game.back_material,
+        ?game.transform
+    );
+
+    # First Pass complete:
+    #
+    #     Green / Red Triangle
+    #             ↓
+    #         RenderTarget
+    gfx.pass_end(?p1);
+
+    # ============================================================
+    # RenderTarget → Texture
+    # ============================================================
+    #
+    # The RenderTarget's Color Attachment
+    # can continue to be used as a Texture.
+    #
+    #     RenderTarget
+    #         │
+    #         ├── Color → Texture
+    #         │
+    #         └── Depth
+    val target_texture: *gfx.Texture =
+        gfx.render_target_texture(?game.target);
+
+    # ============================================================
+    # Pass 2: Texture → Window
+    # ============================================================
+    #
+    # The second Pass no longer performs 3D Mesh drawing.
+    #
+    # It simply displays the Texture obtained from the first Pass
+    # as a 2D image on the Window.
+    var overlay: gfx.PassDesc =
+        gfx.pass_overlay();
+
+    var p2: gfx.Pass =
+        gfx.pass_begin(?game.renderer, ?overlay);
+
+    # Window:
+    #
+    #     960 × 540
+    #
+    # RenderTarget:
+    #
+    #     640 × 360
+    #
+    # Center position:
+    #
+    #     x = 160
+    #     y = 90
+    gfx.pass_draw_sprite(
+        ?p2,
+        opt[*gfx.Texture].some{target_texture},
+        gfx.rect(160.0, 90.0, 640.0, 360.0),
+        gm.vec4(1.0, 1.0, 1.0, 1.0)
+    );
+
+    gfx.pass_end(?p2);
+
+    # ------------------------------------------------------------
+    # End Frame
+    # ------------------------------------------------------------
+    #
+    # The complete flow of this frame:
+    #
+    #     Green / Red Triangle
+    #              ↓
+    #          Pass 1
+    #              ↓
+    #         RenderTarget
+    #              ↓
+    #           Texture
+    #              ↓
+    #          Pass 2
+    #              ↓
+    #           Window
+    val ended: err[gfx.Error] =
+        gfx.renderer_end_frame(?game.renderer);
+
+    if (sel ended.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+    val device: *gfx.Device = gfx.renderer_device(?game.renderer);
+
+    # ------------------------------------------------------------
+    # Release GPU resources
+    # ------------------------------------------------------------
+    #
+    # Both Meshes are GPU resources,
+    # so they must both be released.
+    if (game.ready) {
+        gfx.mesh_delete(device, ?game.front_mesh);
+        gfx.mesh_delete(device, ?game.back_mesh);
+        gfx.render_target_delete(device, ?game.target);
+    }
+
+    # Finally destroy the Renderer.
+    val renderer_closed: err[gfx.Error] =
+        gfx.renderer_dnit(?game.renderer);
+
+    if (sel renderer_closed.err) {
+        context_fail(ctx, 1);
+    }
+
+    game.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var ctx: Context;
+
+    # Window:
+    #
+    #     960 × 540
+    #
+    # RenderTarget:
+    #
+    #     640 × 360
+    val cfg: Config = Config{
+        width: 960,
+        height: 540,
+        title: "Lesson 12 - Render Target",
+        fixed_dt: SECOND / 60,
+        max_frame: SECOND / 4,
+        frame_dt: 0,
+        mode: WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] =
+        context_init(?ctx, cfg);
+
+    if (sel started.err) {
+        ret 1;
+    }
+
+    var game: Game;
+    game.ready = false;
+
+    # Renderer needs the address of the Window.
+    val renderer_started: err[gfx.Error] =
+        gfx.renderer_init(
+            ?game.renderer,
+            ?ctx.window
+        );
+
+    if (sel renderer_started.err) {
+        context_shutdown(?ctx);
+        ret 1;
+    }
+
+    # Give the Game to the Context.
+    context_set_user(?ctx, ?game);
+
+    var app: App = App{
+        f_init: on_init,
+        f_tick: on_tick,
+        f_draw: on_draw,
+        f_dnit: on_dnit,
+    };
+
+    val ran: res[i64, EngineError] =
+        run(?ctx, ?app);
+
+    # on_dnit is already responsible for releasing the Renderer and GPU resources.
+    val closed: err[ContextError] =
+        context_shutdown(?ctx);
+
+    if (sel closed.err) {
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

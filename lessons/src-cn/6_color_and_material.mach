@@ -1,0 +1,491 @@
+# Example 06 - Color 与 Material
+#
+# 本例学习两个重要概念：
+#
+# 1. Color（颜色）
+#    用 RGBA 表示：
+#
+#    R = Red（红色）
+#    G = Green（绿色）
+#    B = Blue（蓝色）
+#    A = Alpha（透明度）
+#
+#    boom 中的颜色分量通常使用 0.0 ~ 1.0：
+#
+#    0.0 = 没有
+#    1.0 = 最大
+#
+#    例如：
+#
+#    gm.vec4(1.0, 0.0, 0.0, 1.0)
+#
+#    表示完全不透明的红色。
+#
+# 2. Material（材质）
+#    Material 描述模型表面的绘制参数。
+#
+#    当前 boom 的 Material 主要保存：
+#
+#    base color（基础颜色）
+#    texture bindings（纹理绑定）
+#
+#    本课暂时只使用 base color。
+#    Texture（纹理）会在后面的课程学习。
+#
+# 本例使用“同一个 Mesh + 三个 Material”：
+#
+#    左边   红色 Material
+#    中间   绿色 Material
+#    右边   蓝色 Material
+#
+# 三个三角形的几何数据完全相同，
+# 只是使用了不同的 Material。
+#
+# 这样可以直观看到一个非常重要的游戏引擎设计：
+#
+#    Geometry（几何体）
+#          +
+#    Material（材质）
+#          ↓
+#    最终的表面外观
+#
+# 同一个 Mesh 可以重复使用，
+# 不需要为了不同颜色复制一份几何数据。
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    # Renderer 管理 GPU、Swapchain 和 Frame。
+    renderer: gfx.Renderer;
+
+    # 三个三角形共用同一个 Mesh。
+    mesh: gfx.Mesh;
+
+    # 三个不同颜色的 Material。
+    material_red: gfx.Material;
+    material_green: gfx.Material;
+    material_blue: gfx.Material;
+
+    # 3D Camera。
+    camera: gfx.Camera;
+
+    # 每个三角形拥有自己的 Transform，
+    # 因此可以使用相同 Mesh 但放在不同位置。
+    transform_red: gm.Transform;
+    transform_green: gm.Transform;
+    transform_blue: gm.Transform;
+
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer 关闭失败：{}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    # 初始化 Renderer。
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer 初始化失败：{}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # GPU 资源需要使用 Renderer 所属的 Device。
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # 标准 3D 顶点布局：
+    #
+    # Position（位置）3
+    # Normal（法线）3
+    # UV / TexCoord（纹理坐标）2
+    #
+    # 每个 Vertex 共 8 个 f32。
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -0.65, -0.55, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         0.65, -0.55, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.00,  0.65, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    # 三角形的 Index。
+    #
+    # 三个三角形使用完全相同的几何顺序。
+    var indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # 创建唯一的一份 Mesh。
+    #
+    # 后面三个 Draw Call 都会重复使用这一个 Mesh。
+    val mesh_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?indices[0],
+        3,
+    );
+    if (sel mesh_result.err) {
+        print.eprintlnf(
+            "Mesh 创建失败：{}",
+            gfx.error_message(mesh_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh = mesh_result.ok;
+
+    # ============================================================
+    # 创建三个 Material
+    # ============================================================
+    #
+    # Material 的 base_color 是 RGBA：
+    #
+    #    R G B A
+    #
+    # 例如：
+    #
+    #    绿色 = (0.5, 1.0, 0.5, 1.0)
+    #
+    # Alpha 先保持 1.0，也就是完全不透明。
+    # 透明材质以后单独学习。
+
+    # 左边：红色。
+    g.material_red = gfx.material();
+    gfx.material_set_color(
+        ?g.material_red,
+        gm.vec4(1.0, 0.2, 0.2, 1.0),
+    );
+
+    # 中间：绿色。
+    #
+    # 这是本教程默认使用的三角形绿色。
+    g.material_green = gfx.material();
+    gfx.material_set_color(
+        ?g.material_green,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    # 右边：蓝色。
+    g.material_blue = gfx.material();
+    gfx.material_set_color(
+        ?g.material_blue,
+        gm.vec4(0.2, 0.5, 1.0, 1.0),
+    );
+
+    # ============================================================
+    # 创建 Camera
+    # ============================================================
+    #
+    # Camera 使用 Perspective Projection（透视投影）。
+    #
+    # Camera 会提供：
+    #
+    #    View Matrix（视图矩阵）
+    #    Projection Matrix（投影矩阵）
+    val aspect: f32 = w::f32 / h::f32;
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 5.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    # ============================================================
+    # 创建三个 Transform
+    # ============================================================
+    #
+    # Transform（变换）决定 Mesh 在世界中的：
+    #
+    #    Position（位置）
+    #    Rotation（旋转）
+    #    Scale（缩放）
+    #
+    # 三个 Transform 使用相同的 Mesh，
+    # 只是把它们分别移动到左、中、右。
+    g.transform_red = gm.transform_identity();
+    g.transform_red.position = gm.vec3(
+        -1.6,
+        0.0,
+        0.0,
+    );
+
+    g.transform_green = gm.transform_identity();
+    g.transform_green.position = gm.vec3(
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    g.transform_blue = gm.transform_identity();
+    g.transform_blue.position = gm.vec3(
+        1.6,
+        0.0,
+        0.0,
+    );
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # 本课暂时不让三角形运动。
+    #
+    # 重点是观察：
+    #
+    #    一个 Mesh
+    #       +
+    #    三个不同 Material
+    #       ↓
+    #    三种不同外观
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Window 大小变化后更新 Camera 的 Aspect Ratio（宽高比）。
+    g.camera.aspect = w / h;
+
+    # 开始当前 Frame。
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame 开始失败：{}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Scene Pass（场景通道）负责 3D 绘制。
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # ============================================================
+    # 使用同一个 Mesh 绘制三个不同颜色的三角形
+    # ============================================================
+    #
+    # 这里三个 Draw Call 使用：
+    #
+    #    相同 Mesh
+    #    不同 Material
+    #    不同 Transform
+    #
+    # 所以：
+    #
+    #    Geometry 决定“形状”
+    #    Transform 决定“在哪里”
+    #    Material 决定“表面怎么画”
+    #
+    # 这是现代游戏引擎中非常重要的资源复用方式。
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material_red,
+        ?g.transform_red,
+    );
+
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material_green,
+        ?g.transform_green,
+    );
+
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh,
+        ?g.material_blue,
+        ?g.transform_blue,
+    );
+
+    gfx.pass_end(?pass);
+
+    # 提交并 Present 当前 Frame。
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame 结束失败：{}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # 三个 Material 都只是 CPU 侧的材质描述，
+    # 没有独立 GPU 资源需要像 Mesh 一样删除。
+    #
+    # Mesh 是 GPU 资源，所以退出时必须释放。
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    gfx.mesh_delete(
+        d,
+        ?g.mesh,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    # 设置 App 生命周期回调。
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "第 06 课：Color 与 Material",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    # 如果 context_init() 返回错误，
+    # 说明 Context 初始化失败。
+    val started: err[ContextError] = context_init(
+        ?ctx,
+        cfg,
+    );
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context 初始化失败：{}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    # 把 Game 状态交给 Context。
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    # 进入 Boom 游戏循环。
+    val ran: res[i64, EngineError] = run(
+        ?ctx,
+        ?app,
+    );
+
+    # 关闭 Context。
+    val closed: err[ContextError] = context_shutdown(
+        ?ctx,
+    );
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context 关闭失败：{}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "游戏循环失败：{}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

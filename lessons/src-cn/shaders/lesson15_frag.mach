@@ -1,0 +1,133 @@
+# 第15课 Fragment Shader
+#
+# 当前画面的处理顺序：
+#
+#     RenderTarget Texture
+#             ↓
+#        tex.sample_2d()
+#             ↓
+#          Vignette
+#             ↓
+#         Color Tint
+#             ↓
+#        最终颜色
+#
+# 第14课的 Vignette 保留在这里。
+#
+# 第15课新增：
+#
+#     binding 4 → Params
+#
+#     Params.tint：
+#         Tint 目标颜色
+#
+#     Params.amount.x：
+#         Tint 强度
+
+use tex: shader.texture;
+
+rec Params {
+    tint: f32x4;
+    amount: f32x4;
+}
+
+#[sampler(0, 1)]
+var source: tex.Sampler2D;
+
+#[uniform(0, 4)]
+var params: Params;
+
+#[input(0)]
+var in_uv: f32x2;
+
+#[output(0)]
+var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    # --------------------------------------------------------
+    # 第13课：读取 RenderTarget Texture
+    # --------------------------------------------------------
+    val texel: f32x4 =
+        tex.sample_2d(source, in_uv);
+
+    # --------------------------------------------------------
+    # 第14课：Vignette
+    # --------------------------------------------------------
+    #
+    # UV：
+    #
+    #     0.0 ~ 1.0
+    #
+    # 把中心移动到：
+    #
+    #     0.0
+    #
+    # 最终范围：
+    #
+    #     -1.0 ~ +1.0
+    val centered_x: f32 =
+        (in_uv[0] - 0.5) * 2.0;
+
+    val centered_y: f32 =
+        (in_uv[1] - 0.5) * 2.0;
+
+    # 到屏幕中心的平方距离。
+    val radius2: f32 =
+        centered_x * centered_x
+        + centered_y * centered_y;
+
+    # Vignette 强度。
+    #
+    # 这里保持第14课效果，不使用新的 Uniform，
+    # 让第15课把重点放在 Tint Uniform。
+    val vignette_strength: f32 = 0.55 + params.amount[0] * 0.65;
+    var vignette: f32 = 1.0 - radius2 * vignette_strength;
+
+    if (vignette < 0.0) {
+        vignette = 0.0;
+    }
+
+    # 先应用第14课的 Vignette。
+    val vignetted: f32x4 = f32x4{
+        texel[0] * vignette,
+        texel[1] * vignette,
+        texel[2] * vignette,
+        texel[3]
+    };
+
+    # --------------------------------------------------------
+    # 第15课：Color Tint
+    # --------------------------------------------------------
+    #
+    # Tint 目标颜色来自 CPU：
+    #
+    #     binding 4
+    #
+    # amount.x 控制 Tint 强度。
+    val amount: f32 =
+        params.amount[0];
+
+    # 将 Vignette 后的颜色乘上 Tint。
+    val tinted: f32x4 = f32x4{
+        vignetted[0] * params.tint[0],
+        vignetted[1] * params.tint[1],
+        vignetted[2] * params.tint[2],
+        vignetted[3]
+    };
+
+    # 0.0：
+    #
+    #     只显示 Vignette 后的原图
+    #
+    # 1.0：
+    #
+    #     完全使用 Tint 后的颜色
+    out_colour = f32x4{
+        vignetted[0] + (tinted[0] - vignetted[0]) * amount,
+        vignetted[1] + (tinted[1] - vignetted[1]) * amount,
+        vignetted[2] + (tinted[2] - vignetted[2]) * amount,
+        vignetted[3]
+    };
+}
+

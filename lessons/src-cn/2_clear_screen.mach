@@ -1,0 +1,236 @@
+# Example 02 - Clear Screen
+#
+# 本例学习 Renderer 的基本 Frame 流程：
+#
+# 1. Renderer（渲染器）
+#    负责 GPU、Swapchain（交换链）和 Frame 的提交。
+#
+# 2. Frame（帧）
+#    一次完整的画面更新。
+#
+# 3. Render Pass（渲染通道）
+#    描述这一阶段往哪个目标绘制，以及开始时如何处理颜色和深度。
+#
+# 4. Clear（清除）
+#    在 Pass 开始时把画面设置成指定颜色。
+#
+# 5. Present（呈现）
+#    把本次 Frame 最终提交并显示到窗口。
+#
+# 本课还不绘制 Mesh。
+# 目标只有一个：
+#
+#    Renderer → Frame → Pass → Clear → End Frame
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    renderer: gfx.Renderer;
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer 关闭失败：{}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+
+    # 当前版本 renderer_init() 直接接收 Window。
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer 初始化失败：{}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # 本课没有需要更新的游戏状态。
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # renderer_begin_frame() 现在返回 res[bool, gfx.Error]。
+    #
+    # ok = false：
+    #    Swapchain（交换链）发生重建，或者窗口最小化。
+    #    当前 Frame 不应该继续绘制，下一帧再尝试。
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame 开始失败：{}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Overlay Pass（覆盖层通道）使用像素坐标。
+    # 本课暂时不画 2D 图形，只利用它最简单地开始一个 Pass。
+    var pass_desc: gfx.PassDesc = gfx.pass_overlay();
+
+    # clear 现在是 Option（可选值）：
+    #
+    #    some{颜色}
+    #        表示 Pass 开始时清除成这个颜色。
+    #
+    #    none{}
+    #        表示不清除。
+    pass_desc.clear = opt[gm.Vec4].some{
+        gm.vec4(
+            0.05,
+            0.08,
+            0.12,
+            1.0,
+        )
+    };
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # 当前 Pass 没有任何 Draw Call。
+    gfx.pass_end(?pass);
+
+    # renderer_end_frame() 现在返回 err[gfx.Error]。
+    # 它负责提交并 Present 当前 Frame。
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame 结束失败：{}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # Renderer 必须在 Context 之前关闭。
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "第 02 课：Clear Screen",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context 初始化失败：{}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    val ran: res[i64, EngineError] = run(?ctx, ?app);
+
+    val closed: err[ContextError] = context_shutdown(?ctx);
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context 关闭失败：{}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "游戏循环失败：{}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

@@ -1,0 +1,746 @@
+# Lesson 15: Vignette and Color Tint
+#
+# Lesson 13:
+#
+#     RenderTarget
+#         ↓
+#     Texture
+#         ↓
+#     Fragment Shader
+#         ↓
+#     grayscale
+#
+# Lesson 14:
+#
+#     RenderTarget
+#         ↓
+#     Texture
+#         ↓
+#     UV / Screen Space
+#         ↓
+#     Vignette
+#
+# Lesson 15 continues to keep the content of the previous two lessons and adds:
+#
+#     Color Tint
+#         +
+#     Uniform
+#
+# Final:
+#
+#     3D Scene
+#         ↓
+#     RenderTarget
+#         ↓
+#     Texture
+#         ↓
+#     Vignette
+#         ↓
+#     Color Tint
+#         ↓
+#     Window
+#
+# Tint strength changes between 0.0 → 1.0 → 0.0,
+# so you can see the filter gradually appear, then gradually disappear.
+#
+# The first Pass continues to use the two triangles from Lesson 12:
+#
+#     0 → 1 → 2: green front face
+#     0 → 2 → 1: red back face
+
+use std.chrono.duration.SECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+use pipe: boom.graphics.pipeline;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_shutdown;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+# ------------------------------------------------------------
+# Shader SPIR-V
+# ------------------------------------------------------------
+#
+# Two Shader artifacts:
+#
+#     Vertex Shader
+#     Fragment Shader
+#
+# Compiled into SPIR-V and embedded into the program.
+#[embed("{artifact.shader-lesson15_vert.out}")]
+val TINT_VERT_SPV: [_]u8;
+
+#[embed("{artifact.shader-lesson15_frag.out}")]
+val TINT_FRAG_SPV: [_]u8;
+
+# ------------------------------------------------------------
+# Post-processing Uniform
+# ------------------------------------------------------------
+#
+# binding 4:
+#
+# tint:
+#     Target color.
+#
+# amount.x:
+#     Tint strength.
+#
+#     0.0 → do not use Tint
+#     1.0 → fully use Tint
+rec Params {
+    tint: gm.Vec4;
+    amount: gm.Vec4;
+}
+
+rec Game {
+    renderer: gfx.Renderer;
+
+    # Offscreen target for the first Pass.
+    target: gfx.RenderTarget;
+
+    # Front and back triangles from Lesson 12.
+    front_mesh: gfx.Mesh;
+    back_mesh: gfx.Mesh;
+
+    # Front green, back red.
+    front_material: gfx.Material;
+    back_material: gfx.Material;
+
+    # Camera for the first Pass.
+    camera: gfx.Camera;
+
+    # Both triangles share the same Transform.
+    transform: gm.Transform;
+
+    # --------------------------------------------------------
+    # Second Pass
+    # --------------------------------------------------------
+
+    # Quad covering the entire Window.
+    post_mesh: gfx.Mesh;
+
+    # The first Texture is the RenderTarget's Color Texture.
+    post_material: gfx.Material;
+
+    # Lesson 15's own Shader.
+    post_shader: gfx.Shader;
+
+    # Transform for the full-screen Quad.
+    post_transform: gm.Transform;
+
+    # Shader parameters.
+    params: Params;
+
+    # Triangle rotation angle.
+    angle: f32;
+
+    # Tint strength.
+    tint_amount: f32;
+
+    # Direction of Tint strength change.
+    tint_forward: bool;
+
+    # --------------------------------------------------------
+    # Resource state
+    # --------------------------------------------------------
+    renderer_ok: bool;
+    target_ok: bool;
+    front_mesh_ok: bool;
+    back_mesh_ok: bool;
+    post_mesh_ok: bool;
+    shader_ok: bool;
+}
+
+fun on_init(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+    val device: *gfx.Device = gfx.renderer_device(?game.renderer);
+
+    # ------------------------------------------------------------
+    # RenderTarget
+    # ------------------------------------------------------------
+    #
+    # First Pass:
+    #
+    #     3D Scene → RenderTarget
+    #
+    # The 640 × 360 offscreen image will finally be used as a Texture
+    # and handed to the second Pass.
+    val target_result: res[gfx.RenderTarget, gfx.Error] =
+        gfx.render_target(device, 640, 360);
+
+    if (sel target_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.target = target_result.ok;
+    game.target_ok = true;
+
+    # ------------------------------------------------------------
+    # Triangle Vertex
+    # ------------------------------------------------------------
+    #
+    # Position:
+    # Normal:
+    # UV / TexCoord:
+    #
+    # The triangle directly uses ±1.0, ensuring the main object is clear enough.
+    var vertices: [24]f32 = [24]f32{
+        -1.0, -1.0, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+         1.0, -1.0, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+         0.0,  1.0, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0
+    };
+
+    # Front winding order.
+    var front_indices: [3]u32 = [3]u32{0, 1, 2};
+
+    # Back winding order.
+    var back_indices: [3]u32 = [3]u32{0, 2, 1};
+
+    val vertex_format: gfx.VertexFormat =
+        gfx.vertex_format_standard();
+
+    # ------------------------------------------------------------
+    # Front Mesh
+    # ------------------------------------------------------------
+    val front_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?vertices[0],
+            3,
+            ?vertex_format,
+            ?front_indices[0],
+            3
+        );
+
+    if (sel front_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.front_mesh = front_result.ok;
+    game.front_mesh_ok = true;
+
+    # ------------------------------------------------------------
+    # Back Mesh
+    # ------------------------------------------------------------
+    #
+    # Vertices are exactly the same, only the Index order changes.
+    val back_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?vertices[0],
+            3,
+            ?vertex_format,
+            ?back_indices[0],
+            3
+        );
+
+    if (sel back_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.back_mesh = back_result.ok;
+    game.back_mesh_ok = true;
+
+    # ------------------------------------------------------------
+    # Material
+    # ------------------------------------------------------------
+    game.front_material = gfx.material();
+    game.back_material = gfx.material();
+
+    # Front: light green.
+    gfx.material_set_color(
+        ?game.front_material,
+        gm.vec4(0.5, 1.0, 0.5, 1.0)
+    );
+
+    # Back: red.
+    gfx.material_set_color(
+        ?game.back_material,
+        gm.vec4(1.0, 0.2, 0.2, 1.0)
+    );
+
+    # ------------------------------------------------------------
+    # Camera
+    # ------------------------------------------------------------
+    #
+    # The triangle uses ±1.0,
+    # so pull the Camera closer, letting the single main object occupy more of the frame.
+    game.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 1.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        640.0 / 360.0,
+        0.1,
+        100.0
+    );
+
+    game.transform = gm.transform_identity();
+    game.transform.position = gm.vec3(0.0, 0.0, -2.0);
+
+    # ------------------------------------------------------------
+    # Create Full-screen Quad
+    # ------------------------------------------------------------
+    #
+    # Second Pass:
+    #
+    #     RenderTarget Texture
+    #             ↓
+    #            Quad
+    #             ↓
+    #        Custom Shader
+    #             ↓
+    #           Window
+    var post_vertices: [32]f32 = [32]f32{
+        -0.5, -0.5, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+         0.5, -0.5, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+         0.5,  0.5, 0.0,  0.0, 0.0, 1.0,  1.0, 1.0,
+        -0.5,  0.5, 0.0,  0.0, 0.0, 1.0,  0.0, 1.0
+    };
+
+    var post_indices: [6]u32 = [6]u32{
+        0, 1, 2,
+        0, 2, 3
+    };
+
+    val post_mesh_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?post_vertices[0],
+            4,
+            ?vertex_format,
+            ?post_indices[0],
+            6
+        );
+
+    if (sel post_mesh_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.post_mesh = post_mesh_result.ok;
+    game.post_mesh_ok = true;
+
+    # ------------------------------------------------------------
+    # Post-processing Material
+    # ------------------------------------------------------------
+    #
+    # The RenderTarget's Color Texture is the input to the second Pass.
+    val target_texture: *gfx.Texture =
+        gfx.render_target_texture(?game.target);
+
+    game.post_material = gfx.material();
+
+    # The RenderTarget is smaller than the Window,
+    # so Linear Filtering is used when scaling up the image.
+    val texture_added: err[gfx.MaterialError] =
+        gfx.material_add_texture_filtered(
+            ?game.post_material,
+            "source",
+            target_texture,
+            gfx.TextureFilter.linear{}
+        );
+
+    if (sel texture_added.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # Create Shader
+    # ------------------------------------------------------------
+    val shader_created: err[gfx.Error] =
+        gfx.shader(
+            ?game.post_shader,
+            ?TINT_VERT_SPV[0],
+            $length_of(TINT_VERT_SPV),
+            ?TINT_FRAG_SPV[0],
+            $length_of(TINT_FRAG_SPV)
+        );
+
+    if (sel shader_created.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.shader_ok = true;
+
+    # The second Pass is a full-screen 2D Quad:
+    #
+    #     no Back-face Culling needed
+    #     no Depth Test needed
+    gfx.shader_set_state(
+        ?game.post_shader,
+        pipe.pipeline_desc_2d()
+    );
+
+    # ------------------------------------------------------------
+    # Full-screen Quad Transform
+    # ------------------------------------------------------------
+    #
+    # The Quad itself is only 1 × 1.
+    # on_draw() stretches it to fill the entire window based on the current framebuffer size.
+    game.post_transform = gm.transform_identity();
+
+    # ------------------------------------------------------------
+    # Tint parameters
+    # ------------------------------------------------------------
+    #
+    # Warm color:
+    #
+    #     R ↑
+    #     G slightly lower
+    #     B even lower
+    #
+    # This makes the image gradually shift toward a warm tone.
+    game.params.tint = gm.vec4(1.10, 0.90, 0.72, 1.0);
+    game.params.amount = gm.vec4(0.0, 0.0, 0.0, 0.0);
+
+    game.tint_amount = 0.0;
+    game.tint_forward = true;
+    game.angle = 0.0;
+}
+
+fun on_tick(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+
+    # ------------------------------------------------------------
+    # Triangle rotation
+    # ------------------------------------------------------------
+    game.angle = game.angle + 0.02;
+
+    if (game.angle >= gm.radians(360.0)) {
+        game.angle = game.angle - gm.radians(360.0);
+    }
+
+    game.transform.rotation = gm.quat_from_axis_angle(
+        gm.vec3(0.0, 1.0, 0.0),
+        game.angle
+    );
+
+    # ------------------------------------------------------------
+    # Tint strength
+    # ------------------------------------------------------------
+    #
+    #     0.0 → no filter
+    #     1.0 → fully applied Tint
+    #
+    # Then restore in reverse.
+    if (game.tint_forward) {
+        game.tint_amount = game.tint_amount + 0.005;
+
+        if (game.tint_amount >= 1.0) {
+            game.tint_amount = 1.0;
+            game.tint_forward = false;
+        }
+    }
+    or {
+        game.tint_amount = game.tint_amount - 0.005;
+
+        if (game.tint_amount <= 0.0) {
+            game.tint_amount = 0.0;
+            game.tint_forward = true;
+        }
+    }
+
+    game.params.amount = gm.vec4(game.tint_amount, 0.0, 0.0, 0.0);
+}
+
+fun on_draw(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+
+    # ------------------------------------------------------------
+    # Begin Frame
+    # ------------------------------------------------------------
+    val began: res[bool, gfx.Error] =
+        gfx.renderer_begin_frame(?game.renderer);
+
+    if (sel began.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!began.ok) {
+        ret;
+    }
+
+    # Use the actual size of the current framebuffer.
+    val width: f32 =
+        gfx.renderer_width(?game.renderer)::f32;
+
+    val height: f32 =
+        gfx.renderer_height(?game.renderer)::f32;
+
+    if (width <= 0.0 || height <= 0.0) {
+        val ended_empty: err[gfx.Error] =
+            gfx.renderer_end_frame(?game.renderer);
+        ret;
+    }
+
+    # Quad center is at screen center,
+    # Quad size exactly covers the entire framebuffer.
+    game.post_transform.position =
+        gm.vec3(width * 0.5, height * 0.5, 0.0);
+    game.post_transform.scale = gm.vec3(width, height, 1.0);
+
+    # ============================================================
+    # Pass 1: 3D Scene → RenderTarget
+    # ============================================================
+    var scene: gfx.PassDesc = gfx.pass_scene(?game.camera);
+
+    # PassDesc.target determines this Pass's output target,
+    # that is, where the color is finally written after this round of drawing.
+    #
+    # If target does not specify a RenderTarget:
+    #
+    #     target = none
+    #
+    # then the default Window / Swapchain is used as the output target,
+    # which means displaying the image directly on screen.
+    #
+    # Now:
+    #
+    #     ?game.target
+    #
+    # gets the address of game.target:
+    #
+    #     *RenderTarget
+    #
+    # Then using:
+    #
+    #     opt[*gfx.RenderTarget].some{...}
+    #
+    # assigns this RenderTarget to target.
+    #
+    # So this Pass:
+    #
+    #     Mesh
+    #       ↓
+    #     Scene Pass
+    #       ↓
+    #     RenderTarget
+    #
+    # The image is not displayed directly on screen,
+    # but saved first for the second Pass to use.
+    scene.target = opt[*gfx.RenderTarget].some{?game.target};
+
+    var p1: gfx.Pass =
+        gfx.pass_begin(?game.renderer, ?scene);
+
+    # Front green.
+    gfx.pass_draw_material(
+        ?p1,
+        ?game.front_mesh,
+        ?game.front_material,
+        ?game.transform
+    );
+
+    # Back red.
+    gfx.pass_draw_material(
+        ?p1,
+        ?game.back_mesh,
+        ?game.back_material,
+        ?game.transform
+    );
+
+    gfx.pass_end(?p1);
+
+    # ============================================================
+    # Pass 2: Texture → Vignette → Color Tint → Window
+    # ============================================================
+    #
+    # The RenderTarget's color attachment can be used as a Texture.
+    var overlay: gfx.PassDesc = gfx.pass_overlay();
+
+    # A full-screen Quad does not need the Pass's Frustum Culling.
+    overlay.cull = false;
+
+    var p2: gfx.Pass =
+        gfx.pass_begin(?game.renderer, ?overlay);
+
+    # ------------------------------------------------------------
+    # binding 4: Post-processing Uniform
+    # ------------------------------------------------------------
+    #
+    # Params:
+    #
+    #     tint
+    #     amount
+    #
+    # Two Vec4s total 32 bytes.
+    val user_set: err[gfx.Error] =
+        gfx.pass_set_user(
+            ?p2,
+            (?game.params):~*u8,
+            $size_of(Params)
+        );
+
+    if (sel user_set.err) {
+        gfx.pass_end(?p2);
+        val ended_error: err[gfx.Error] =
+            gfx.renderer_end_frame(?game.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # Custom Shader
+    # ------------------------------------------------------------
+    #
+    # The Fragment Shader simultaneously performs:
+    #
+    #     1. Texture Sampling
+    #     2. Vignette
+    #     3. Color Tint
+    #
+    # Material's first Texture:
+    #
+    #     RenderTarget Color Texture
+    #
+    # binding 4:
+    #
+    #     Params
+    gfx.pass_draw_shaded(
+        ?p2,
+        ?game.post_mesh,
+        ?game.post_material,
+        ?game.post_transform,
+        ?game.post_shader
+    );
+
+    gfx.pass_end(?p2);
+
+    # ------------------------------------------------------------
+    # End Frame
+    # ------------------------------------------------------------
+    val ended: err[gfx.Error] =
+        gfx.renderer_end_frame(?game.renderer);
+
+    if (sel ended.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+
+    if (game.renderer_ok) {
+        val device: *gfx.Device =
+            gfx.renderer_device(?game.renderer);
+
+        if (game.shader_ok) {
+            gfx.shader_delete(?game.post_shader, device);
+        }
+
+        if (game.post_mesh_ok) {
+            gfx.mesh_delete(device, ?game.post_mesh);
+        }
+
+        if (game.back_mesh_ok) {
+            gfx.mesh_delete(device, ?game.back_mesh);
+        }
+
+        if (game.front_mesh_ok) {
+            gfx.mesh_delete(device, ?game.front_mesh);
+        }
+
+        if (game.target_ok) {
+            gfx.render_target_delete(device, ?game.target);
+        }
+
+        val renderer_closed: err[gfx.Error] =
+            gfx.renderer_dnit(?game.renderer);
+
+        if (sel renderer_closed.err) {
+            context_fail(ctx, 1);
+        }
+    }
+
+    game.renderer_ok = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var ctx: Context;
+
+    val cfg: Config = Config{
+        width: 960,
+        height: 540,
+        title: "Lesson 15 - Color Tint",
+        fixed_dt: SECOND / 60,
+        max_frame: SECOND / 4,
+        frame_dt: 0,
+        mode: WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] =
+        context_init(?ctx, cfg);
+
+    if (sel started.err) {
+        ret 1;
+    }
+
+    var game: Game;
+    game.renderer_ok = false;
+    game.target_ok = false;
+    game.front_mesh_ok = false;
+    game.back_mesh_ok = false;
+    game.post_mesh_ok = false;
+    game.shader_ok = false;
+
+    # Context itself owns the Window.
+    val renderer_started: err[gfx.Error] =
+        gfx.renderer_init(?game.renderer, ?ctx.window);
+
+    if (sel renderer_started.err) {
+        context_shutdown(?ctx);
+        ret 1;
+    }
+
+    game.renderer_ok = true;
+
+    context_set_user(?ctx, ?game);
+
+    var app: App = App{
+        f_init: on_init,
+        f_tick: on_tick,
+        f_draw: on_draw,
+        f_dnit: on_dnit,
+    };
+
+    val ran: res[i64, EngineError] =
+        run(?ctx, ?app);
+
+    val closed: err[ContextError] =
+        context_shutdown(?ctx);
+
+    if (sel closed.err) {
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

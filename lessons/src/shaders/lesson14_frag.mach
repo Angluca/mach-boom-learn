@@ -1,0 +1,143 @@
+# Lesson 14: Vignette Fragment Shader
+#
+# The Fragment Shader processes every Pixel.
+#
+# This lesson uses UV / TexCoord:
+#
+#     (0, 0) ───────────── (1, 0)
+#       │                     │
+#       │        (0.5,0.5)    │
+#       │          center     │
+#       │                     │
+#     (0, 1) ───────────── (1, 1)
+#
+# The closer the current Pixel is to the center:
+#
+#     the more original color is kept
+#
+# The closer the current Pixel is to the edge:
+#
+#     the darker the color becomes
+#
+# This is Vignette.
+
+use tex: shader.texture;
+
+rec Params {
+    strength: f32x4;
+}
+
+# The RenderTarget's Color Texture.
+#[sampler(0, 1)]
+var source: tex.Sampler2D;
+
+# Vignette parameters provided by the Game itself.
+#[uniform(0, 4)]
+var params: Params;
+
+# UV passed from the Vertex Shader.
+#[input(0)]
+var in_uv: f32x2;
+
+# Final output color.
+#[output(0)]
+var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    # --------------------------------------------------------
+    # Read the previous Pass's image
+    #
+    # tex.sample_2d is the wrapper for OpImageSampleImplicitLod.
+    # Lesson 13 already demonstrated its underlying form,
+    # so here we use the standard library version directly.
+    # --------------------------------------------------------
+    val texel: f32x4 =
+        tex.sample_2d(
+            source,
+            in_uv
+        );
+
+    # --------------------------------------------------------
+    # Move the center of UV to 0
+    # --------------------------------------------------------
+    #
+    # Originally:
+    #
+    #     0.0 ~ 1.0
+    #
+    # After subtracting 0.5:
+    #
+    #    -0.5 ~ +0.5
+    #
+    # Now the screen center is:
+    #
+    #     (0, 0)
+    val centered_x: f32 =
+        (in_uv[0] - 0.5) * 2.0;
+
+    val centered_y: f32 =
+        (in_uv[1] - 0.5) * 2.0;
+
+    # --------------------------------------------------------
+    # Compute the squared distance to the screen center
+    # --------------------------------------------------------
+    #
+    # Using squared distance avoids taking a square root:
+    #
+    #     distance² = x² + y²
+    #
+    # Center:
+    #
+    #     0² + 0² = 0
+    #
+    # The closer to the corner:
+    #
+    #     the larger distance² becomes
+    val radius2: f32 =
+        centered_x * centered_x
+        + centered_y * centered_y;
+
+    # --------------------------------------------------------
+    # Compute edge darkness based on distance
+    # --------------------------------------------------------
+    #
+    # strength:
+    #
+    #     0.0 → essentially no Vignette
+    #     larger → darker edges
+    val strength: f32 =
+        params.strength[0];
+
+    var vignette: f32 =
+        1.0 - radius2 * strength;
+
+    # The darkest value should not go below 0.
+    if (vignette < 0.0) {
+        vignette = 0.0;
+    }
+
+    # --------------------------------------------------------
+    # Original image × Vignette
+    # --------------------------------------------------------
+    #
+    # Center region:
+    #
+    #     vignette ≈ 1
+    #
+    # so the color remains essentially unchanged.
+    #
+    # Edge region:
+    #
+    #     the closer vignette is to 0
+    #
+    # the darker the image becomes.
+    out_colour =
+        f32x4{
+            texel[0] * vignette,
+            texel[1] * vignette,
+            texel[2] * vignette,
+            texel[3]
+        };
+}
+

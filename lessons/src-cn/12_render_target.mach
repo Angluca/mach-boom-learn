@@ -1,0 +1,650 @@
+# 第12课：Render Target（离屏渲染）与 Multi-Pass（多通道渲染）
+#
+# 前面的课程里，我们一直把场景直接画到 Window：
+#
+#     Mesh → Pass → Window
+#
+# 这一课把绘制目标独立出来：
+#
+#     Pass 1：
+#         Triangle → RenderTarget
+#
+#     Pass 2：
+#         RenderTarget Texture → Window
+#
+# RenderTarget（渲染目标）
+#     GPU 用来接收渲染结果的目标。
+#
+# Offscreen Rendering（离屏渲染）
+#     不直接画到 Window，而是先画到 RenderTarget。
+#
+# Multi-Pass（多通道渲染）
+#     同一帧执行多个 Pass，让后面的 Pass 继续使用前一个 Pass 的结果。
+#
+# 这一课继续使用第5课的 Winding Order（顶点绕序）例子：
+#
+#     正面三角形：0 → 1 → 2，绿色
+#     背面三角形：0 → 2 → 1，红色
+#
+# 两个三角形的位置和旋转完全相同，只是 Index（索引）顺序相反。
+#
+# Renderer 默认开启 Back-face Culling（背面剔除）：
+#
+#     正面朝向 Camera → 绿色三角形可见
+#     背面朝向 Camera → 绿色被剔除，红色三角形可见
+#
+# 所以旋转一整圈时：
+#
+#     绿色 → 侧面 → 红色 → 侧面 → 绿色
+#
+# 同时，这两个三角形不是直接画到 Window，
+# 而是先画到 640 × 360 的 RenderTarget，
+# 然后第二个 Pass 再把 RenderTarget 的 Texture
+# 显示到 960 × 540 的 Window 中央。
+
+use std.chrono.duration.SECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_shutdown;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+rec Game {
+    renderer: gfx.Renderer;
+
+    # 第一 Pass 的绘制目标。
+    #
+    # 两个三角形都会先画到这里：
+    #
+    #     Green Triangle
+    #          +
+    #      Red Triangle
+    #          ↓
+    #      RenderTarget
+    target: gfx.RenderTarget;
+
+    # 正面绿色三角形的 Mesh。
+    front_mesh: gfx.Mesh;
+
+    # 背面红色三角形的 Mesh。
+    #
+    # 它和 front_mesh 使用完全相同的 Vertex 数据，
+    # 只是 Index 顺序相反。
+    back_mesh: gfx.Mesh;
+
+    # 正面绿色材质。
+    front_material: gfx.Material;
+
+    # 背面红色材质。
+    back_material: gfx.Material;
+
+    # 第一 Pass 使用的 3D Camera。
+    camera: gfx.Camera;
+
+    # 两个三角形共用同一个 Transform。
+    transform: gm.Transform;
+
+    # 当前旋转角度。
+    angle: f32;
+
+    # GPU 资源是否已经准备完成。
+    ready: bool;
+}
+
+fun on_init(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+    val device: *gfx.Device = gfx.renderer_device(?game.renderer);
+
+    # ------------------------------------------------------------
+    # 创建 RenderTarget
+    # ------------------------------------------------------------
+    #
+    # Window：
+    #
+    #     960 × 540
+    #
+    # RenderTarget：
+    #
+    #     640 × 360
+    #
+    # 两者保持相同的宽高比例。
+    #
+    # 第一 Pass 会把完整的 3D 画面写入 RenderTarget。
+    val target_result: res[gfx.RenderTarget, gfx.Error] =
+        gfx.render_target(device, 640, 360);
+
+    if (sel target_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.target = target_result.ok;
+
+    # ------------------------------------------------------------
+    # Vertex 数据
+    # ------------------------------------------------------------
+    #
+    # 两个三角形使用完全相同的三个 Vertex：
+    #
+    #         2
+    #        / \
+    #       /   \
+    #      0-----1
+    #
+    # Position（位置） = 3 × f32
+    # Normal（法线）   = 3 × f32
+    # UV（纹理坐标）   = 2 × f32
+    #
+    # 这一课不使用纹理，但继续保留标准 Vertex 格式，
+    # 让 Mesh 与前面课程保持一致。
+    var vertices: [24]f32 = [24]f32{
+        -2.0, -2.0, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+         2.0, -2.0, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+         0.0,  2.0, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0
+    };
+
+    # ------------------------------------------------------------
+    # 两套 Index
+    # ------------------------------------------------------------
+    #
+    # front_indices：
+    #
+    #     0 → 1 → 2
+    #
+    # 是正面绕序。
+    #
+    # back_indices：
+    #
+    #     0 → 2 → 1
+    #
+    # 与正面完全相反，所以会被识别成反向面。
+    #
+    # Renderer 开启 Back-face Culling 后，
+    # 同一个旋转角度下只会留下朝向 Camera 的那一面。
+    var front_indices: [3]u32 = [3]u32{0, 1, 2};
+    var back_indices: [3]u32 = [3]u32{0, 2, 1};
+
+    # vertex_format_standard() 返回一个 VertexFormat 值。
+    val vertex_format: gfx.VertexFormat =
+        gfx.vertex_format_standard();
+
+    # ------------------------------------------------------------
+    # 创建正面 Mesh
+    # ------------------------------------------------------------
+    val front_mesh_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?vertices[0],
+            3,
+            ?vertex_format,
+            ?front_indices[0],
+            3
+        );
+
+    if (sel front_mesh_result.err) {
+        gfx.render_target_delete(device, ?game.target);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.front_mesh = front_mesh_result.ok;
+
+    # ------------------------------------------------------------
+    # 创建背面 Mesh
+    # ------------------------------------------------------------
+    #
+    # Vertex 数据完全相同，
+    # 只有 Index 顺序改变。
+    val back_mesh_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?vertices[0],
+            3,
+            ?vertex_format,
+            ?back_indices[0],
+            3
+        );
+
+    if (sel back_mesh_result.err) {
+        gfx.mesh_delete(device, ?game.front_mesh);
+        gfx.render_target_delete(device, ?game.target);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.back_mesh = back_mesh_result.ok;
+
+    # ------------------------------------------------------------
+    # 创建两个 Material
+    # ------------------------------------------------------------
+    #
+    # 几何位置完全相同，
+    # 所以要用不同 Material 来区分当前看到的是哪一面。
+    game.front_material = gfx.material();
+    game.back_material = gfx.material();
+
+    # 正面：绿色。
+    gfx.material_set_color(
+        ?game.front_material,
+        gm.vec4(0.5, 1.0, 0.5, 1.0)
+    );
+
+    # 背面：红色。
+    gfx.material_set_color(
+        ?game.back_material,
+        gm.vec4(1.0, 0.2, 0.2, 1.0)
+    );
+
+    # ------------------------------------------------------------
+    # 创建 Camera
+    # ------------------------------------------------------------
+    #
+    # Camera 在：
+    #
+    #     (0, 0, 4)
+    #
+    # 看向：
+    #
+    #     (0, 0, 0)
+    #
+    # 第一 Pass 的 RenderTarget 是 640 × 360，
+    # 所以使用 640 / 360 作为 aspect。
+    game.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 4.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        640.0 / 360.0,
+        0.1,
+        100.0
+    );
+
+    # ------------------------------------------------------------
+    # 创建 Transform
+    # ------------------------------------------------------------
+    #
+    # 两个三角形共用同一个 Transform。
+    #
+    # 因此：
+    #
+    #     绿色三角形
+    #     红色三角形
+    #
+    # 始终完全重合。
+    game.transform = gm.transform_identity();
+    game.transform.position = gm.vec3(0.0, 0.0, -2.0);
+
+    game.angle = 0.0;
+    game.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+
+    if (!game.ready) {
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # 绕 Y 轴旋转
+    # ------------------------------------------------------------
+    #
+    # 这一课故意旋转完整 360°。
+    #
+    # 观察过程：
+    #
+    #     0°：
+    #         正面 → 绿色
+    #
+    #     90°：
+    #         接近侧面 → 三角形几乎看不见
+    #
+    #     180°：
+    #         背面 → 红色
+    #
+    #     270°：
+    #         再次接近侧面
+    #
+    #     360°：
+    #         回到正面 → 绿色
+    game.angle = game.angle + 0.02;
+
+    if (game.angle >= gm.radians(360.0)) {
+        game.angle = game.angle - gm.radians(360.0);
+    }
+
+    game.transform.rotation = gm.quat_from_axis_angle(
+        gm.vec3(0.0, 1.0, 0.0),
+        game.angle
+    );
+}
+
+fun on_draw(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+
+    if (!game.ready) {
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # 开始 Frame
+    # ------------------------------------------------------------
+    #
+    # 当前 boom 的 renderer_begin_frame() 返回：
+    #
+    #     res[bool, gfx.Error]
+    #
+    # err：
+    #     Frame 开始失败。
+    #
+    # ok == false：
+    #     当前没有真正打开 Frame，
+    #     这一帧跳过即可。
+    val began: res[bool, gfx.Error] =
+        gfx.renderer_begin_frame(?game.renderer);
+
+    if (sel began.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!began.ok) {
+        ret;
+    }
+
+    # ============================================================
+    # Pass 1：3D Scene → RenderTarget
+    # ============================================================
+    #
+    # 第一 Pass 不是直接显示到 Window，
+    # 而是把整个 3D 场景画到 game.target。
+    var scene: gfx.PassDesc =
+        gfx.pass_scene(?game.camera);
+
+    # PassDesc.target 决定这个 Pass 的“输出目标”，
+    # 也就是这一轮绘制完成后，颜色结果最终写到哪里。
+    #
+    # target 如果没有指定 RenderTarget：
+    #
+    #     target = none
+    #
+    # 就使用默认的 Window / Swapchain（交换链）作为输出目标，
+    # 也就是直接把画面显示到屏幕。
+    #
+    # 而这里：
+    #
+    #     ?game.target
+    #
+    # 得到的是 game.target 的地址：
+    #
+    #     *RenderTarget
+    #
+    # 再用：
+    #
+    #     opt[*gfx.RenderTarget].some{...}
+    #
+    # 把这个 RenderTarget 指定给 target。
+    #
+    # 因此这一句执行后：
+    #
+    #     Mesh → 当前 Pass → game.target
+    #
+    # 而不是：
+    #
+    #     Mesh → 当前 Pass → Window
+    #
+    # 也就是说，画面会先写入 RenderTarget，
+    # 暂时不会直接显示到屏幕。
+    #
+    # 第一 Pass 完成后，我们还可以通过
+    # render_target_texture() 取得它的 Color Texture，
+    # 再让第二个 Pass 把这张 Texture 显示到 Window。
+    scene.target =
+        opt[*gfx.RenderTarget].some{?game.target};
+
+    var p1: gfx.Pass =
+        gfx.pass_begin(?game.renderer, ?scene);
+
+    # ------------------------------------------------------------
+    # 先画正面 Mesh
+    # ------------------------------------------------------------
+    #
+    # 它的 Index：
+    #
+    #     0 → 1 → 2
+    #
+    # 使用绿色 Material。
+    #
+    # 当这一面朝向 Camera 时：
+    #
+    #     Back-face Culling 不会剔除它
+    #     → 绿色三角形出现
+    gfx.pass_draw_material(
+        ?p1,
+        ?game.front_mesh,
+        ?game.front_material,
+        ?game.transform
+    );
+
+    # ------------------------------------------------------------
+    # 再画反向 Mesh
+    # ------------------------------------------------------------
+    #
+    # 它的 Index：
+    #
+    #     0 → 2 → 1
+    #
+    # 使用红色 Material。
+    #
+    # 当绿色三角形转到背面后，
+    # 绿色 Mesh 被 Back-face Culling 剔除，
+    # 此时红色 Mesh 的这一面正好朝向 Camera：
+    #
+    #     → 红色三角形出现
+    #
+    # 所以“红色”不是通过 CPU 判断角度强行切换的，
+    # 而是真正利用了 GPU 的 Back-face Culling。
+    gfx.pass_draw_material(
+        ?p1,
+        ?game.back_mesh,
+        ?game.back_material,
+        ?game.transform
+    );
+
+    # 第一 Pass 完成：
+    #
+    #     Green / Red Triangle
+    #             ↓
+    #         RenderTarget
+    gfx.pass_end(?p1);
+
+    # ============================================================
+    # RenderTarget → Texture
+    # ============================================================
+    #
+    # RenderTarget 的 Color Attachment（颜色附件）
+    # 可以作为 Texture（纹理）继续使用。
+    #
+    #     RenderTarget
+    #         │
+    #         ├── Color → Texture
+    #         │
+    #         └── Depth
+    val target_texture: *gfx.Texture =
+        gfx.render_target_texture(?game.target);
+
+    # ============================================================
+    # Pass 2：Texture → Window
+    # ============================================================
+    #
+    # 第二 Pass 不再进行 3D Mesh 绘制。
+    #
+    # 它只是把第一 Pass 得到的 Texture
+    # 当成 2D 图片显示到 Window。
+    var overlay: gfx.PassDesc =
+        gfx.pass_overlay();
+
+    var p2: gfx.Pass =
+        gfx.pass_begin(?game.renderer, ?overlay);
+
+    # Window：
+    #
+    #     960 × 540
+    #
+    # RenderTarget：
+    #
+    #     640 × 360
+    #
+    # 中央位置：
+    #
+    #     x = 160
+    #     y = 90
+    gfx.pass_draw_sprite(
+        ?p2,
+        opt[*gfx.Texture].some{target_texture},
+        gfx.rect(160.0, 90.0, 640.0, 360.0),
+        gm.vec4(1.0, 1.0, 1.0, 1.0)
+    );
+
+    gfx.pass_end(?p2);
+
+    # ------------------------------------------------------------
+    # 结束 Frame
+    # ------------------------------------------------------------
+    #
+    # 这一帧完整的流程：
+    #
+    #     Green / Red Triangle
+    #              ↓
+    #          Pass 1
+    #              ↓
+    #         RenderTarget
+    #              ↓
+    #           Texture
+    #              ↓
+    #          Pass 2
+    #              ↓
+    #           Window
+    val ended: err[gfx.Error] =
+        gfx.renderer_end_frame(?game.renderer);
+
+    if (sel ended.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+    val device: *gfx.Device = gfx.renderer_device(?game.renderer);
+
+    # ------------------------------------------------------------
+    # 释放 GPU 资源
+    # ------------------------------------------------------------
+    #
+    # 两个 Mesh 都是 GPU 资源，
+    # 所以必须全部释放。
+    if (game.ready) {
+        gfx.mesh_delete(device, ?game.front_mesh);
+        gfx.mesh_delete(device, ?game.back_mesh);
+        gfx.render_target_delete(device, ?game.target);
+    }
+
+    # 最后再销毁 Renderer。
+    val renderer_closed: err[gfx.Error] =
+        gfx.renderer_dnit(?game.renderer);
+
+    if (sel renderer_closed.err) {
+        context_fail(ctx, 1);
+    }
+
+    game.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var ctx: Context;
+
+    # Window：
+    #
+    #     960 × 540
+    #
+    # RenderTarget：
+    #
+    #     640 × 360
+    val cfg: Config = Config{
+        width: 960,
+        height: 540,
+        title: "Lesson 12 - Render Target",
+        fixed_dt: SECOND / 60,
+        max_frame: SECOND / 4,
+        frame_dt: 0,
+        mode: WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] =
+        context_init(?ctx, cfg);
+
+    if (sel started.err) {
+        ret 1;
+    }
+
+    var game: Game;
+    game.ready = false;
+
+    # Renderer 需要 Window 的地址。
+    val renderer_started: err[gfx.Error] =
+        gfx.renderer_init(
+            ?game.renderer,
+            ?ctx.window
+        );
+
+    if (sel renderer_started.err) {
+        context_shutdown(?ctx);
+        ret 1;
+    }
+
+    # 把 Game 交给 Context。
+    context_set_user(?ctx, ?game);
+
+    var app: App = App{
+        f_init: on_init,
+        f_tick: on_tick,
+        f_draw: on_draw,
+        f_dnit: on_dnit,
+    };
+
+    val ran: res[i64, EngineError] =
+        run(?ctx, ?app);
+
+    # on_dnit 已经负责释放 Renderer 和 GPU 资源。
+    val closed: err[ContextError] =
+        context_shutdown(?ctx);
+
+    if (sel closed.err) {
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

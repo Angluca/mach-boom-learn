@@ -1,0 +1,85 @@
+# Lesson 11: Fragment Shader
+#
+# This lesson reads a Storage Buffer for the first time.
+#
+# binding 4:
+#
+#    Uniform
+#    Stores the index for the current Draw.
+#
+# binding 8:
+#
+#    Storage Buffer
+#    Stores 32 colors.
+#
+# The Shader's job:
+#
+#    read index
+#        ↓
+#    read palette[index]
+#        ↓
+#    output color
+#
+# ------------------------------------------------------------
+# Why does the Storage Buffer use std430?
+# ------------------------------------------------------------
+#
+# The Storage Buffer uses std430 (Standard Storage Buffer Layout).
+#
+# In this example the array elements are f32x4:
+#
+#    [32]f32x4
+#
+# Each element is exactly 16 bytes,
+# so on the CPU side:
+#
+#    [32]gm.Vec4
+#
+# can be written directly as contiguous memory.
+#
+# This is why Storage Buffers are very suitable for storing array data.
+
+rec Params {
+    # control.x:
+    # The color index that the current Draw needs to use.
+    control: f32x4;
+}
+
+rec Palette {
+    # 32 colors.
+    #
+    # The Shader can read directly by index:
+    #
+    #    palette.items[index]
+    items: [32]f32x4;
+}
+
+# binding 4:
+# Uniform parameters for the current Draw.
+#[uniform(0, 4)]
+var params: Params;
+
+# binding 8:
+# Storage Buffer shared by the entire Frame.
+#[storage(0, 8)]
+var palette: Palette;
+
+#[output(0)]
+var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    # Uniform only tells the Shader:
+    #
+    #    "Which color do I want?"
+    #
+    # The actual color data comes from the Storage Buffer.
+    val index: u32 = params.control[0]::u32;
+
+    # Read the color from the Storage Buffer.
+    val colour: f32x4 = palette.items[index];
+
+    # Output the color stored in the Storage Buffer.
+    out_colour = colour;
+}
+

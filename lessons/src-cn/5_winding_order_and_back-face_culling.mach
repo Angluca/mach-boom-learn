@@ -1,0 +1,451 @@
+# Example 05 - Winding Order & Back-face Culling
+#
+# 本例学习两个非常重要的 3D 概念：
+#
+# 1. Winding Order（顶点绕序）
+#    三角形的三个顶点按照不同顺序连接，会产生不同的朝向。
+#
+#    0 -> 1 -> 2：逆时针（Counter-Clockwise）
+#    0 -> 2 -> 1：顺时针（Clockwise）
+#
+# 2. Back-face Culling（背面剔除）
+#    3D Pipeline 默认会进行 Back-face Culling。
+#
+#    当前 boom 的规则是：
+#
+#    Front Face = Counter-Clockwise
+#    Back Face  = Clockwise
+#
+#    当三角形背向摄像机时，
+#    GPU 会把这个面剔除，不再继续光栅化。
+#
+# 本例同时绘制两个完全重合的三角形：
+#
+#    绿色三角形：0 -> 1 -> 2
+#    红色三角形：0 -> 2 -> 1
+#
+# 它们的位置、顶点坐标、Transform、Camera 全部相同，
+# 唯一的区别就是顶点索引顺序和材质颜色。
+#
+# 当三角形绕 Y 轴旋转时：
+#
+#    绿色面朝向摄像机 -> 看到绿色
+#    红色面朝向摄像机 -> 看到红色
+#    接近侧面         -> 看起来越来越窄
+#
+# 这样就能直观看到：
+#
+#    Winding Order
+#         ↓
+#    Front Face / Back Face
+#         ↓
+#    Back-face Culling
+#
+# 注意：
+#
+# pass_desc.cull 控制的是 Frustum Culling（视锥体剔除），
+# 不是本课学习的 Back-face Culling（背面剔除）。
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Game {
+    renderer: gfx.Renderer;
+
+    # 两个 Mesh 使用相同顶点，只改变 Index 顺序。
+    mesh_front: gfx.Mesh;
+    mesh_back: gfx.Mesh;
+
+    # 两个 Material 使用不同颜色，
+    # 方便直接观察哪个面朝向 Camera。
+    material_front: gfx.Material;
+    material_back: gfx.Material;
+
+    camera: gfx.Camera;
+
+    # 两个 Mesh 共用同一个 Transform，
+    # 所以它们始终完全重合。
+    transform: gm.Transform;
+
+    # 当前旋转角度，单位为弧度。
+    angle: f32;
+
+    ready: bool;
+}
+
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf(
+            "Renderer 关闭失败：{}",
+            gfx.error_message(down.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = false;
+    g.angle = 0.0;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    val ri: err[gfx.Error] = gfx.renderer_init(
+        ?g.renderer,
+        ?ctx.window,
+    );
+    if (sel ri.err) {
+        print.eprintlnf(
+            "Renderer 初始化失败：{}",
+            gfx.error_message(ri.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # 标准 3D 顶点布局：
+    #
+    # Position（位置）3
+    # Normal（法线）3
+    # UV / TexCoord（纹理坐标）2
+    #
+    # 一个 Vertex 共 8 个 f32。
+    var vertices: [24]f32 = [24]f32{
+        # Vertex 0
+        -0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+        # Vertex 1
+         0.9, -0.7, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+        # Vertex 2
+         0.0,  0.9, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0,
+    };
+
+    # Counter-Clockwise（逆时针）：
+    #
+    #        2
+    #       / \
+    #      /   \
+    #     0-----1
+    #        ->
+    # 当前 boom 3D Pipeline 将它定义为 Front Face。
+    var front_indices: [3]u32 = [3]u32{
+        0, 1, 2,
+    };
+
+    # Clockwise（顺时针）：
+    #
+    #        2
+    #       / \
+    #      /   \
+    #     0-----1
+    #        <-
+    # 当前 boom 3D Pipeline 将它定义为 Back Face。
+    var back_indices: [3]u32 = [3]u32{
+        0, 2, 1,
+    };
+
+    val format: gfx.VertexFormat = gfx.vertex_format_standard();
+
+    # 创建 Front Face Mesh。
+    #
+    # 注意：顶点坐标完全没有改变，
+    # 真正改变的是 Index 的顺序。
+    val front_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?front_indices[0],
+        3,
+    );
+    if (sel front_result.err) {
+        print.eprintlnf(
+            "Front Mesh 创建失败：{}",
+            gfx.error_message(front_result.err),
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh_front = front_result.ok;
+
+    # 创建 Back Face Mesh。
+    #
+    # 它使用完全相同的顶点，
+    # 只是把 0,1,2 反过来变成 0,2,1。
+    val back_result: res[gfx.Mesh, gfx.Error] = gfx.mesh(
+        d,
+        ?vertices[0],
+        3,
+        ?format,
+        ?back_indices[0],
+        3,
+    );
+    if (sel back_result.err) {
+        print.eprintlnf(
+            "Back Mesh 创建失败：{}",
+            gfx.error_message(back_result.err),
+        );
+        gfx.mesh_delete(
+            d,
+            ?g.mesh_front,
+        );
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    g.mesh_back = back_result.ok;
+
+    # 绿色：代表 Front Face。
+    g.material_front = gfx.material();
+    gfx.material_set_color(
+        ?g.material_front,
+        gm.vec4(0.5, 1.0, 0.5, 1.0),
+    );
+
+    # 红色：代表 Back Face。
+    #
+    # 颜色只是辅助观察，
+    # 真正决定 Front / Back 的仍然是 Winding Order。
+    g.material_back = gfx.material();
+    gfx.material_set_color(
+        ?g.material_back,
+        gm.vec4(1.0, 0.1, 0.1, 1.0),
+    );
+
+    # Perspective Camera（透视摄像机）。
+    val aspect: f32 = w::f32 / h::f32;
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 4.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    g.transform = gm.transform_identity();
+    g.ready = true;
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # 让两个三角形一起绕 Y 轴旋转。
+    #
+    # 因为它们共用同一个 Transform，
+    # 所以唯一影响 Front / Back 判断的变化就是观察方向。
+    g.angle = g.angle + 0.02;
+
+    if (g.angle >= gm.radians(360.0)) {
+        g.angle = g.angle - gm.radians(360.0);
+    }
+
+    g.transform.rotation = gm.quat_from_axis_angle(
+        gm.vec3(0.0, 1.0, 0.0),
+        g.angle,
+    );
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) {
+        ret;
+    }
+
+    # Aspect Ratio（宽高比）参与 Projection Matrix。
+    g.camera.aspect = w / h;
+
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(
+        ?g.renderer,
+    );
+    if (sel br.err) {
+        print.eprintlnf(
+            "Frame 开始失败：{}",
+            gfx.error_message(br.err),
+        );
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!br.ok) {
+        ret;
+    }
+
+    # Scene Pass 使用当前 3D Camera。
+    #
+    # 这里没有修改 pass_desc.cull。
+    # 它默认开启的是 Frustum Culling，
+    # 与 GPU 的 Back-face Culling 是两个不同的机制。
+    var pass_desc: gfx.PassDesc = gfx.pass_scene(
+        ?g.camera,
+    );
+
+    var pass: gfx.Pass = gfx.pass_begin(
+        ?g.renderer,
+        ?pass_desc,
+    );
+
+    # 两个 Mesh 完全重合。
+    #
+    # Green Mesh:
+    #    0,1,2 → Counter-Clockwise → Front Face
+    #
+    # Red Mesh:
+    #    0,2,1 → Clockwise → Back Face
+    #
+    # 当红色的一面朝向 Camera 时，
+    # 它就成为 Front Face，因此可以看到红色。
+    #
+    # 当红色的一面背向 Camera 时，
+    # Back-face Culling 会把它剔除。
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh_front,
+        ?g.material_front,
+        ?g.transform,
+    );
+
+    gfx.pass_draw_material(
+        ?pass,
+        ?g.mesh_back,
+        ?g.material_back,
+        ?g.transform,
+    );
+
+    gfx.pass_end(?pass);
+
+    val er: err[gfx.Error] = gfx.renderer_end_frame(
+        ?g.renderer,
+    );
+    if (sel er.err) {
+        print.eprintlnf(
+            "Frame 结束失败：{}",
+            gfx.error_message(er.err),
+        );
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(
+        ?g.renderer,
+    );
+
+    # Renderer 关闭之前必须先释放它所拥有的 GPU Mesh。
+    gfx.mesh_delete(
+        d,
+        ?g.mesh_front,
+    );
+    gfx.mesh_delete(
+        d,
+        ?g.mesh_back,
+    );
+
+    renderer_down(ctx, ?g.renderer);
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "第 05 课：Winding Order 与 Back-face Culling",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context 初始化失败：{}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    val ran: res[i64, EngineError] = run(?ctx, ?app);
+
+    val closed: err[ContextError] = context_shutdown(?ctx);
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context 关闭失败：{}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "游戏循环失败：{}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

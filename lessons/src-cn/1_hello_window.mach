@@ -1,0 +1,161 @@
+# Example 01 - Hello Window
+#
+# 本例学习 Boom 最基本的程序结构：
+#
+# 1. Context（运行上下文）
+#    管理窗口、输入、时钟和游戏循环所需要的状态。
+#
+# 2. Window（窗口）
+#    Context 初始化时会创建游戏窗口。
+#
+# 3. App（应用生命周期）
+#    用 f_init、f_tick、f_draw、f_dnit 连接游戏的不同生命周期。
+#
+# 4. Game Loop（游戏循环）
+#    Boom 会不断执行：
+#
+#    Tick → Draw → Tick → Draw ...
+#
+# 本课暂时不使用 Renderer。
+# 重点只是先理解一个 Boom 程序是怎样启动、运行和退出的。
+
+use std.runtime;
+use std.print;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_init;
+use boom.context.context_shutdown;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+rec Game {
+    # 当前示例只保存初始化状态。
+    ready: bool;
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = true;
+
+    print.println("Hello Window!");
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # Tick 用来更新游戏状态。
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # 本课还没有 Renderer，所以这里暂时不绘制 GPU 内容。
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        ret;
+    }
+
+    # 游戏退出时在这里释放自己的资源。
+    g.ready = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    # App 负责把游戏代码接入 Boom 的生命周期。
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "第 01 课：Hello Window",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    # context_init() 现在返回 err[ContextError]。
+    #
+    # sel 是 Mach 新的 Tag/Result 判断方式：
+    #
+    #    started.err
+    #        表示初始化失败。
+    #
+    #    ContextError 则说明失败发生在哪个阶段。
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf(
+            "Context 初始化失败：{}",
+            context_error_message(started.err),
+        );
+        ret 1;
+    }
+
+    # 把 Game 状态交给 Context。
+    context_set_user(
+        ?ctx,
+        (?game)::ptr,
+    );
+
+    # run() 现在返回 res[i64, EngineError]。
+    #
+    # ok：
+    #    游戏正常停止，并携带最终退出状态。
+    #
+    # err：
+    #    游戏循环自身发生错误。
+    val ran: res[i64, EngineError] = run(?ctx, ?app);
+
+    # run() 内部已经调用了 f_dnit。
+    # 所以这里最后关闭 Context。
+    val closed: err[ContextError] = context_shutdown(?ctx);
+    if (sel closed.err) {
+        print.eprintlnf(
+            "Context 关闭失败：{}",
+            context_error_message(closed.err),
+        );
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        print.eprintlnf(
+            "游戏循环失败：{}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+
