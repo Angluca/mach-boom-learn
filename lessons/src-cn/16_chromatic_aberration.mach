@@ -1,0 +1,761 @@
+# 第16课：Chromatic Aberration（色差）
+#
+# 第13课：
+#
+#     RenderTarget → Texture → Fragment Shader
+#
+# 第14课：
+#
+#     UV / Screen Space → Vignette
+#
+# 第15课：
+#
+#     Uniform → Color Tint
+#
+# 这一课全部保留，并增加：
+#
+#     Chromatic Aberration（色差）
+#
+# 色差的基本思路：
+#
+#     不再让 R / G / B 三个颜色通道使用完全相同的采样位置。
+#
+#     R：
+#         向屏幕边缘方向偏移
+#
+#     G：
+#         保持原来的位置
+#
+#     B：
+#         向相反方向偏移
+#
+# 于是屏幕边缘会出现轻微的彩色分离。
+#
+# 最终处理流程：
+#
+#     RenderTarget Texture
+#             ↓
+#       RGB Texture Sampling
+#             ↓
+#          Vignette
+#             ↓
+#          Color Tint
+#             ↓
+#     Chromatic Aberration
+#             ↓
+#           Window
+#
+# 这一课仍然使用第12课开始的：
+#
+#     0 → 1 → 2：绿色正面
+#     0 → 2 → 1：红色背面
+#
+# 所以三角形旋转时仍然会：
+#
+#     正面 → 绿色
+#     背面 → 红色
+#
+# Tint 的强度会同时控制：
+#
+#     Color Tint
+#     Vignette
+#     Chromatic Aberration
+#
+# 三个效果一起增强，再一起减弱。
+
+use std.chrono.duration.SECOND;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+
+use gfx: boom.graphics;
+use gm: boom.math;
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_shutdown;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.run;
+use boom.window.WindowMode;
+
+# ------------------------------------------------------------
+# Shader SPIR-V
+# ------------------------------------------------------------
+
+#[embed("{artifact.shader-lesson16_vert.out}")]
+val ABERRATION_VERT_SPV: [_]u8;
+
+#[embed("{artifact.shader-lesson16_frag.out}")]
+val ABERRATION_FRAG_SPV: [_]u8;
+
+# ------------------------------------------------------------
+# Post-processing Uniform
+# ------------------------------------------------------------
+#
+# binding 4：
+#
+# tint：
+#     目标颜色。
+#
+# amount.x：
+#     整体效果强度。
+#
+#     0.0 → 没有效果
+#     1.0 → 最大效果
+rec Params {
+    tint: gm.Vec4;
+    amount: gm.Vec4;
+}
+
+rec Game {
+    renderer: gfx.Renderer;
+
+    # 第一 Pass：
+    #
+    #     3D Scene → RenderTarget
+    target: gfx.RenderTarget;
+
+    # 正面和背面三角形。
+    front_mesh: gfx.Mesh;
+    back_mesh: gfx.Mesh;
+
+    # 正面绿色，背面红色。
+    front_material: gfx.Material;
+    back_material: gfx.Material;
+
+    # 3D Camera。
+    camera: gfx.Camera;
+
+    # 两个三角形共用同一个 Transform。
+    transform: gm.Transform;
+
+    # --------------------------------------------------------
+    # 第二 Pass
+    # --------------------------------------------------------
+
+    # 覆盖整个 Window 的 Quad。
+    post_mesh: gfx.Mesh;
+
+    # 第一张 Texture 是 RenderTarget 的颜色结果。
+    post_material: gfx.Material;
+
+    # 自定义后处理 Shader。
+    post_shader: gfx.Shader;
+
+    # Full-screen Quad 的 Transform。
+    post_transform: gm.Transform;
+
+    # Shader 参数。
+    params: Params;
+
+    # 三角形旋转角度。
+    angle: f32;
+
+    # 后处理效果强度。
+    tint_amount: f32;
+
+    # 后处理效果变化方向。
+    tint_forward: bool;
+
+    # --------------------------------------------------------
+    # 资源状态
+    # --------------------------------------------------------
+    renderer_ok: bool;
+    target_ok: bool;
+    front_mesh_ok: bool;
+    back_mesh_ok: bool;
+    post_mesh_ok: bool;
+    shader_ok: bool;
+}
+
+fun on_init(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+    val device: *gfx.Device = gfx.renderer_device(?game.renderer);
+
+    # ------------------------------------------------------------
+    # RenderTarget
+    # ------------------------------------------------------------
+    #
+    # 第一 Pass 的 3D 场景先画到：
+    #
+    #     640 × 360
+    #
+    # 后面这个结果会作为第二 Pass 的 Texture。
+    val target_result: res[gfx.RenderTarget, gfx.Error] =
+        gfx.render_target(device, 640, 360);
+
+    if (sel target_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.target = target_result.ok;
+    game.target_ok = true;
+
+    # ------------------------------------------------------------
+    # Triangle Vertex
+    # ------------------------------------------------------------
+    #
+    # 使用 ±1.0 的大小。
+    #
+    #         2
+    #        / \
+    #       /   \
+    #      0-----1
+    var vertices: [24]f32 = [24]f32{
+        -1.0, -1.0, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+         1.0, -1.0, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+         0.0,  1.0, 0.0,  0.0, 0.0, 1.0,  0.5, 1.0
+    };
+
+    # 正面：
+    #
+    #     0 → 1 → 2
+    var front_indices: [3]u32 = [3]u32{0, 1, 2};
+
+    # 背面：
+    #
+    #     0 → 2 → 1
+    var back_indices: [3]u32 = [3]u32{0, 2, 1};
+
+    val vertex_format: gfx.VertexFormat =
+        gfx.vertex_format_standard();
+
+    # ------------------------------------------------------------
+    # 创建正面 Mesh
+    # ------------------------------------------------------------
+    val front_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?vertices[0],
+            3,
+            ?vertex_format,
+            ?front_indices[0],
+            3
+        );
+
+    if (sel front_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.front_mesh = front_result.ok;
+    game.front_mesh_ok = true;
+
+    # ------------------------------------------------------------
+    # 创建背面 Mesh
+    # ------------------------------------------------------------
+    val back_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?vertices[0],
+            3,
+            ?vertex_format,
+            ?back_indices[0],
+            3
+        );
+
+    if (sel back_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.back_mesh = back_result.ok;
+    game.back_mesh_ok = true;
+
+    # ------------------------------------------------------------
+    # Material
+    # ------------------------------------------------------------
+    game.front_material = gfx.material();
+    game.back_material = gfx.material();
+
+    # 正面：浅绿色。
+    gfx.material_set_color(
+        ?game.front_material,
+        gm.vec4(0.5, 1.0, 0.5, 1.0)
+    );
+
+    # 背面：红色。
+    gfx.material_set_color(
+        ?game.back_material,
+        gm.vec4(1.0, 0.2, 0.2, 1.0)
+    );
+
+    # ------------------------------------------------------------
+    # Camera
+    # ------------------------------------------------------------
+    #
+    # Triangle 使用 ±1.0，
+    # Camera 放在足够远的位置保证完整显示。
+    game.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 0.0, 3.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        640.0 / 360.0,
+        0.1,
+        100.0
+    );
+
+    game.transform = gm.transform_identity();
+    game.transform.position = gm.vec3(0.0, 0.0, -1.0);
+
+    # ------------------------------------------------------------
+    # 创建 Full-screen Quad
+    # ------------------------------------------------------------
+    #
+    # 第二 Pass：
+    #
+    #     RenderTarget Texture
+    #             ↓
+    #           Quad
+    #             ↓
+    #       Fragment Shader
+    #             ↓
+    #           Window
+    var post_vertices: [32]f32 = [32]f32{
+        -0.5, -0.5, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0,
+         0.5, -0.5, 0.0,  0.0, 0.0, 1.0,  1.0, 0.0,
+         0.5,  0.5, 0.0,  0.0, 0.0, 1.0,  1.0, 1.0,
+        -0.5,  0.5, 0.0,  0.0, 0.0, 1.0,  0.0, 1.0
+    };
+
+    var post_indices: [6]u32 = [6]u32{
+        0, 1, 2,
+        0, 2, 3
+    };
+
+    val post_mesh_result: res[gfx.Mesh, gfx.Error] =
+        gfx.mesh(
+            device,
+            ?post_vertices[0],
+            4,
+            ?vertex_format,
+            ?post_indices[0],
+            6
+        );
+
+    if (sel post_mesh_result.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.post_mesh = post_mesh_result.ok;
+    game.post_mesh_ok = true;
+
+    # ------------------------------------------------------------
+    # Post-processing Material
+    # ------------------------------------------------------------
+    #
+    # RenderTarget 的 Color Texture 作为后处理输入。
+    val target_texture: *gfx.Texture =
+        gfx.render_target_texture(?game.target);
+
+    game.post_material = gfx.material();
+
+    # 第二 Pass 会把 640 × 360 的画面放大到 Window，
+    # 所以使用 Linear Filtering（线性过滤）。
+    val texture_added: err[gfx.MaterialError] =
+        gfx.material_add_texture_filtered(
+            ?game.post_material,
+            "source",
+            target_texture,
+            gfx.TextureFilter.linear{}
+        );
+
+    if (sel texture_added.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # 创建 Shader
+    # ------------------------------------------------------------
+    val shader_created: err[gfx.Error] =
+        gfx.shader(
+            ?game.post_shader,
+            ?ABERRATION_VERT_SPV[0],
+            $length_of(ABERRATION_VERT_SPV),
+            ?ABERRATION_FRAG_SPV[0],
+            $length_of(ABERRATION_FRAG_SPV)
+        );
+
+    if (sel shader_created.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    game.shader_ok = true;
+
+    # 第二 Pass 使用 2D Pipeline：
+    #
+    #     不需要 Back-face Culling
+    #     不需要 Depth Test
+    gfx.shader_set_state(
+        ?game.post_shader,
+        gfx.pipeline_desc_2d()
+    );
+
+    # ------------------------------------------------------------
+    # Full-screen Quad Transform
+    # ------------------------------------------------------------
+    game.post_transform = gm.transform_identity();
+
+    # ------------------------------------------------------------
+    # Post-processing 参数
+    # ------------------------------------------------------------
+    #
+    # 暖色 Tint。
+    game.params.tint = gm.vec4(1.10, 0.90, 0.72, 1.0);
+
+    # 从没有效果开始。
+    game.params.amount = gm.vec4(0.0, 0.0, 0.0, 0.0);
+
+    game.tint_amount = 0.0;
+    game.tint_forward = true;
+    game.angle = 0.0;
+}
+
+fun on_tick(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+
+    # ------------------------------------------------------------
+    # Triangle 旋转
+    # ------------------------------------------------------------
+    game.angle = game.angle + 0.02;
+
+    if (game.angle >= gm.radians(360.0)) {
+        game.angle = game.angle - gm.radians(360.0);
+    }
+
+    game.transform.rotation = gm.quat_from_axis_angle(
+        gm.vec3(0.0, 1.0, 0.0),
+        game.angle
+    );
+
+    # ------------------------------------------------------------
+    # 整体后处理强度
+    # ------------------------------------------------------------
+    #
+    # 同一个参数同时控制：
+    #
+    #     Vignette
+    #     Color Tint
+    #     Chromatic Aberration
+    #
+    # 这样三个效果会一起增强和减弱。
+    if (game.tint_forward) {
+        game.tint_amount = game.tint_amount + 0.005;
+
+        if (game.tint_amount >= 1.0) {
+            game.tint_amount = 1.0;
+            game.tint_forward = false;
+        }
+    }
+    or {
+        game.tint_amount = game.tint_amount - 0.005;
+
+        if (game.tint_amount <= 0.0) {
+            game.tint_amount = 0.0;
+            game.tint_forward = true;
+        }
+    }
+
+    game.params.amount = gm.vec4(game.tint_amount, 0.0, 0.0, 0.0);
+}
+
+fun on_draw(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+
+    # ------------------------------------------------------------
+    # 开始 Frame
+    # ------------------------------------------------------------
+    val began: res[bool, gfx.Error] =
+        gfx.renderer_begin_frame(?game.renderer);
+
+    if (sel began.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    if (!began.ok) {
+        ret;
+    }
+
+    val width: f32 =
+        gfx.renderer_width(?game.renderer)::f32;
+
+    val height: f32 =
+        gfx.renderer_height(?game.renderer)::f32;
+
+    # Full-screen Quad：
+    #
+    #     Position = Window 中心
+    #     Scale    = Window 大小
+    game.post_transform.position =
+        gm.vec3(width * 0.5, height * 0.5, 0.0);
+
+    game.post_transform.scale =
+        gm.vec3(width, height, 1.0);
+
+    # ============================================================
+    # Pass 1：3D Scene → RenderTarget
+    # ============================================================
+    var scene: gfx.PassDesc =
+        gfx.pass_scene(?game.camera);
+
+    # PassDesc.target 决定这个 Pass 的输出目标。
+    #
+    # target 为 none 时：
+    #
+    #     使用默认的 Window / Swapchain
+    #     → 直接显示到屏幕。
+    #
+    # 这里改成 some{?game.target}：
+    #
+    #     Mesh
+    #       ↓
+    #     Scene Pass
+    #       ↓
+    #     RenderTarget
+    #
+    # 因此这一 Pass 不直接显示在屏幕上，
+    # 而是先把完整 3D 画面保存到 RenderTarget。
+    #
+    # 后面的 Pass 可以通过 render_target_texture()
+    # 继续使用这个颜色结果。
+    scene.target =
+        opt[*gfx.RenderTarget].some{?game.target};
+
+    var p1: gfx.Pass =
+        gfx.pass_begin(?game.renderer, ?scene);
+
+    # 正面绿色。
+    gfx.pass_draw_material(
+        ?p1,
+        ?game.front_mesh,
+        ?game.front_material,
+        ?game.transform
+    );
+
+    # 背面红色。
+    gfx.pass_draw_material(
+        ?p1,
+        ?game.back_mesh,
+        ?game.back_material,
+        ?game.transform
+    );
+
+    gfx.pass_end(?p1);
+
+    # ============================================================
+    # Pass 2：Texture → Vignette → Tint → Chromatic Aberration
+    # ============================================================
+    #
+    # 第一 Pass 已经生成 RenderTarget Texture。
+    #
+    # 第二 Pass 使用一个 Full-screen Quad，
+    # Fragment Shader 会对整个画面的每个 Pixel 进行处理。
+    var overlay: gfx.PassDesc =
+        gfx.pass_overlay();
+
+    # Full-screen Quad 不需要 Frustum Culling（视锥体剔除）。
+    overlay.cull = false;
+
+    var p2: gfx.Pass =
+        gfx.pass_begin(
+            ?game.renderer,
+            ?overlay
+        );
+
+    # ------------------------------------------------------------
+    # binding 4：Post-processing 参数
+    # ------------------------------------------------------------
+    #
+    # Params 一共有两个 Vec4：
+    #
+    #     tint
+    #     amount
+    #
+    # 一共 32 bytes。
+    val user_set: err[gfx.Error] =
+        gfx.pass_set_user(
+            ?p2,
+            (?game.params):~*u8,
+            $size_of(Params)
+        );
+
+    if (sel user_set.err) {
+        gfx.pass_end(?p2);
+        val ended_error: err[gfx.Error] =
+            gfx.renderer_end_frame(?game.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # ------------------------------------------------------------
+    # 自定义 Shader
+    # ------------------------------------------------------------
+    #
+    # Shader 会完成：
+    #
+    #     Texture Sampling
+    #          ↓
+    #     Vignette
+    #          ↓
+    #     Color Tint
+    #          ↓
+    #     Chromatic Aberration
+    gfx.pass_draw_shaded(
+        ?p2,
+        ?game.post_mesh,
+        ?game.post_material,
+        ?game.post_transform,
+        ?game.post_shader
+    );
+
+    gfx.pass_end(?p2);
+
+    # ------------------------------------------------------------
+    # 结束 Frame
+    # ------------------------------------------------------------
+    val ended: err[gfx.Error] =
+        gfx.renderer_end_frame(?game.renderer);
+
+    if (sel ended.err) {
+        context_fail(ctx, 1);
+        ret;
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val game: *Game = context_user(ctx):~*Game;
+
+    if (game.renderer_ok) {
+        val device: *gfx.Device =
+            gfx.renderer_device(?game.renderer);
+
+        if (game.shader_ok) {
+            gfx.shader_delete(
+                ?game.post_shader,
+                device
+            );
+        }
+
+        if (game.post_mesh_ok) {
+            gfx.mesh_delete(
+                device,
+                ?game.post_mesh
+            );
+        }
+
+        if (game.back_mesh_ok) {
+            gfx.mesh_delete(
+                device,
+                ?game.back_mesh
+            );
+        }
+
+        if (game.front_mesh_ok) {
+            gfx.mesh_delete(
+                device,
+                ?game.front_mesh
+            );
+        }
+
+        if (game.target_ok) {
+            gfx.render_target_delete(
+                device,
+                ?game.target
+            );
+        }
+
+        val renderer_closed: err[gfx.Error] =
+            gfx.renderer_dnit(?game.renderer);
+
+        if (sel renderer_closed.err) {
+            context_fail(ctx, 1);
+        }
+    }
+
+    game.renderer_ok = false;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var ctx: Context;
+
+    val cfg: Config = Config{
+        width: 960,
+        height: 540,
+        title: "Lesson 16 - Chromatic Aberration",
+        fixed_dt: SECOND / 60,
+        max_frame: SECOND / 4,
+        frame_dt: 0,
+        mode: WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] =
+        context_init(?ctx, cfg);
+
+    if (sel started.err) {
+        ret 1;
+    }
+
+    var game: Game;
+
+    game.renderer_ok = false;
+    game.target_ok = false;
+    game.front_mesh_ok = false;
+    game.back_mesh_ok = false;
+    game.post_mesh_ok = false;
+    game.shader_ok = false;
+
+    # Context 自己拥有 Window。
+    val renderer_started: err[gfx.Error] =
+        gfx.renderer_init(
+            ?game.renderer,
+            ?ctx.window
+        );
+
+    if (sel renderer_started.err) {
+        context_shutdown(?ctx);
+        ret 1;
+    }
+
+    game.renderer_ok = true;
+
+    context_set_user(?ctx, ?game);
+
+    var app: App = App{
+        f_init: on_init,
+        f_tick: on_tick,
+        f_draw: on_draw,
+        f_dnit: on_dnit,
+    };
+
+    val ran: res[i64, EngineError] =
+        run(?ctx, ?app);
+
+    val closed: err[ContextError] =
+        context_shutdown(?ctx);
+
+    if (sel closed.err) {
+        ret 1;
+    }
+
+    if (sel ran.err) {
+        ret 1;
+    }
+
+    ret ran.ok;
+}
+

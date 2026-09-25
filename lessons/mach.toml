@@ -299,3 +299,27 @@ targets = ["spirv"]
 link = []
 need = []
 
+[artifact.16_chromatic_aberration]
+kind = "bin"
+entry = "16_chromatic_aberration.mach"
+out = "bin/16_chromatic_aberration"
+targets = ["*"]
+link = []
+need = ["artifact.shader-lesson16_*"]
+
+[artifact.shader-lesson16_vert]
+kind = "bin"
+entry = "shaders/lesson16_vert.mach"
+out = "spv/lesson16_vert{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.shader-lesson16_frag]
+kind = "bin"
+entry = "shaders/lesson16_frag.mach"
+out = "spv/lesson16_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+

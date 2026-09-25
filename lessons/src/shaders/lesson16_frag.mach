@@ -1,0 +1,213 @@
+# Lesson 16 Fragment Shader
+#
+# This lesson combines the content of the previous three lessons:
+#
+#     Lesson 13:
+#         Texture Sampling
+#
+#     Lesson 14:
+#         UV / Screen Space / Vignette
+#
+#     Lesson 15:
+#         Uniform / Color Tint
+#
+#     Lesson 16:
+#         RGB-separated sampling
+#
+# Chromatic Aberration:
+#
+#     R, G, B no longer read from exactly the same position.
+#
+#     R:
+#         sample toward the screen edge
+#
+#     G:
+#         use the original UV
+#
+#     B:
+#         sample in the opposite direction
+#
+# This produces colored fringes near the screen edges.
+
+use tex: shader.texture;
+
+rec Params {
+    tint: f32x4;
+    amount: f32x4;
+}
+
+# The RenderTarget's Color Texture.
+#[sampler(0, 1)]
+var source: tex.Sampler2D;
+
+# Post-processing parameters provided by the game.
+#[uniform(0, 4)]
+var params: Params;
+
+#[input(0)]
+var in_uv: f32x2;
+
+#[output(0)]
+var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    # --------------------------------------------------------
+    # Lesson 14: UV / Screen Space
+    # --------------------------------------------------------
+    #
+    # Screen center:
+    #
+    #     (0.5, 0.5)
+    #
+    # After shifting:
+    #
+    #     -1.0 ~ +1.0
+    val centered_x: f32 =
+        (in_uv[0] - 0.5) * 2.0;
+
+    val centered_y: f32 =
+        (in_uv[1] - 0.5) * 2.0;
+
+    # Squared distance from the current Pixel to the screen center.
+    val radius2: f32 =
+        centered_x * centered_x
+        + centered_y * centered_y;
+
+    # --------------------------------------------------------
+    # Lesson 16: Chromatic Aberration
+    # --------------------------------------------------------
+    #
+    # amount:
+    #
+    #     0.0 → no color separation
+    #     1.0 → maximum color separation
+    val amount: f32 =
+        params.amount[0];
+
+    # The offset increases with the distance from the screen center.
+    #
+    # Center:
+    #
+    #     offset ≈ 0
+    #
+    # Edge:
+    #
+    #     offset is maximum
+    val spread: f32 =
+        amount * 0.008;
+
+    val offset_x: f32 =
+        centered_x * spread;
+
+    val offset_y: f32 =
+        centered_y * spread;
+
+    # R is offset outward.
+    val red_uv: f32x2 =
+        f32x2{
+            in_uv[0] + offset_x,
+            in_uv[1] + offset_y
+        };
+
+    # G uses the center position.
+    val green_uv: f32x2 =
+        in_uv;
+
+    # B is offset in the opposite direction.
+    val blue_uv: f32x2 =
+        f32x2{
+            in_uv[0] - offset_x,
+            in_uv[1] - offset_y
+        };
+
+    # Read R / G / B separately.
+    #
+    # Same Texture:
+    #
+    #     R → red_uv
+    #     G → green_uv
+    #     B → blue_uv
+    val red_texel: f32x4 =
+        tex.sample_2d(
+            source,
+            red_uv
+        );
+
+    val green_texel: f32x4 =
+        tex.sample_2d(
+            source,
+            green_uv
+        );
+
+    val blue_texel: f32x4 =
+        tex.sample_2d(
+            source,
+            blue_uv
+        );
+
+    # Combine RGB.
+    val sampled: f32x4 =
+        f32x4{
+            red_texel[0],
+            green_texel[1],
+            blue_texel[2],
+            green_texel[3]
+        };
+
+    # --------------------------------------------------------
+    # Lesson 14: Vignette
+    # --------------------------------------------------------
+    #
+    # The strength comes from the amount of Lesson 15/16.
+    #
+    #     amount = 0:
+    #         0.55
+    #
+    #     amount = 1:
+    #         1.20
+    #
+    # As the effect strengthens, the edges also become darker.
+    val vignette_strength: f32 =
+        0.55 + amount * 0.65;
+
+    var vignette: f32 =
+        1.0 - radius2 * vignette_strength;
+
+    if (vignette < 0.0) {
+        vignette = 0.0;
+    }
+
+    val vignetted: f32x4 =
+        f32x4{
+            sampled[0] * vignette,
+            sampled[1] * vignette,
+            sampled[2] * vignette,
+            sampled[3]
+        };
+
+    # --------------------------------------------------------
+    # Lesson 15: Color Tint
+    # --------------------------------------------------------
+    #
+    # Add Tint to the Vignetted image.
+    val tinted: f32x4 =
+        f32x4{
+            vignetted[0] * params.tint[0],
+            vignetted[1] * params.tint[1],
+            vignetted[2] * params.tint[2],
+            vignetted[3]
+        };
+
+    # --------------------------------------------------------
+    # Blend the original image with the Tint result
+    # --------------------------------------------------------
+    out_colour =
+        f32x4{
+            vignetted[0] + (tinted[0] - vignetted[0]) * amount,
+            vignetted[1] + (tinted[1] - vignetted[1]) * amount,
+            vignetted[2] + (tinted[2] - vignetted[2]) * amount,
+            vignetted[3]
+        };
+}
+

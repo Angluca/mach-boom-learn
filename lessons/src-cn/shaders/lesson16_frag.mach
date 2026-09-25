@@ -1,0 +1,213 @@
+# 第16课 Fragment Shader（片段着色器）
+#
+# 这一课把前三课的内容组合起来：
+#
+#     第13课：
+#         Texture Sampling
+#
+#     第14课：
+#         UV / Screen Space / Vignette
+#
+#     第15课：
+#         Uniform / Color Tint
+#
+#     第16课：
+#         RGB 分离采样
+#
+# Chromatic Aberration（色差）：
+#
+#     R、G、B 不再读取完全相同的位置。
+#
+#     R：
+#         向屏幕边缘方向取样
+#
+#     G：
+#         使用原始 UV
+#
+#     B：
+#         向相反方向取样
+#
+# 这样屏幕边缘附近会出现彩色边缘。
+
+use tex: shader.texture;
+
+rec Params {
+    tint: f32x4;
+    amount: f32x4;
+}
+
+# RenderTarget 的 Color Texture。
+#[sampler(0, 1)]
+var source: tex.Sampler2D;
+
+# 游戏提供的后处理参数。
+#[uniform(0, 4)]
+var params: Params;
+
+#[input(0)]
+var in_uv: f32x2;
+
+#[output(0)]
+var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    # --------------------------------------------------------
+    # 第14课：UV / Screen Space
+    # --------------------------------------------------------
+    #
+    # 屏幕中心：
+    #
+    #     (0.5, 0.5)
+    #
+    # 移动以后：
+    #
+    #     -1.0 ~ +1.0
+    val centered_x: f32 =
+        (in_uv[0] - 0.5) * 2.0;
+
+    val centered_y: f32 =
+        (in_uv[1] - 0.5) * 2.0;
+
+    # 当前 Pixel 到屏幕中心的平方距离。
+    val radius2: f32 =
+        centered_x * centered_x
+        + centered_y * centered_y;
+
+    # --------------------------------------------------------
+    # 第16课：Chromatic Aberration
+    # --------------------------------------------------------
+    #
+    # amount：
+    #
+    #     0.0 → 不产生颜色分离
+    #     1.0 → 最大颜色分离
+    val amount: f32 =
+        params.amount[0];
+
+    # 偏移量随着距离屏幕中心增加。
+    #
+    # 中心：
+    #
+    #     offset ≈ 0
+    #
+    # 边缘：
+    #
+    #     offset 最大
+    val spread: f32 =
+        amount * 0.008;
+
+    val offset_x: f32 =
+        centered_x * spread;
+
+    val offset_y: f32 =
+        centered_y * spread;
+
+    # R 向外偏移。
+    val red_uv: f32x2 =
+        f32x2{
+            in_uv[0] + offset_x,
+            in_uv[1] + offset_y
+        };
+
+    # G 使用中心位置。
+    val green_uv: f32x2 =
+        in_uv;
+
+    # B 向相反方向偏移。
+    val blue_uv: f32x2 =
+        f32x2{
+            in_uv[0] - offset_x,
+            in_uv[1] - offset_y
+        };
+
+    # 分别读取 R / G / B。
+    #
+    # 同一张 Texture：
+    #
+    #     R → red_uv
+    #     G → green_uv
+    #     B → blue_uv
+    val red_texel: f32x4 =
+        tex.sample_2d(
+            source,
+            red_uv
+        );
+
+    val green_texel: f32x4 =
+        tex.sample_2d(
+            source,
+            green_uv
+        );
+
+    val blue_texel: f32x4 =
+        tex.sample_2d(
+            source,
+            blue_uv
+        );
+
+    # 组合 RGB。
+    val sampled: f32x4 =
+        f32x4{
+            red_texel[0],
+            green_texel[1],
+            blue_texel[2],
+            green_texel[3]
+        };
+
+    # --------------------------------------------------------
+    # 第14课：Vignette
+    # --------------------------------------------------------
+    #
+    # 强度从第15/16课的 amount 得到。
+    #
+    #     amount = 0：
+    #         0.55
+    #
+    #     amount = 1：
+    #         1.20
+    #
+    # 效果增强时，边缘也会变得更暗。
+    val vignette_strength: f32 =
+        0.55 + amount * 0.65;
+
+    var vignette: f32 =
+        1.0 - radius2 * vignette_strength;
+
+    if (vignette < 0.0) {
+        vignette = 0.0;
+    }
+
+    val vignetted: f32x4 =
+        f32x4{
+            sampled[0] * vignette,
+            sampled[1] * vignette,
+            sampled[2] * vignette,
+            sampled[3]
+        };
+
+    # --------------------------------------------------------
+    # 第15课：Color Tint
+    # --------------------------------------------------------
+    #
+    # 给 Vignette 后的画面加入 Tint。
+    val tinted: f32x4 =
+        f32x4{
+            vignetted[0] * params.tint[0],
+            vignetted[1] * params.tint[1],
+            vignetted[2] * params.tint[2],
+            vignetted[3]
+        };
+
+    # --------------------------------------------------------
+    # 原图与 Tint 结果混合
+    # --------------------------------------------------------
+    out_colour =
+        f32x4{
+            vignetted[0] + (tinted[0] - vignetted[0]) * amount,
+            vignetted[1] + (tinted[1] - vignetted[1]) * amount,
+            vignetted[2] + (tinted[2] - vignetted[2]) * amount,
+            vignetted[3]
+        };
+}
+
