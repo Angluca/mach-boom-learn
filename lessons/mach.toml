@@ -347,3 +347,27 @@ targets = ["spirv"]
 link = []
 need = []
 
+[artifact.18_blur]
+kind = "bin"
+entry = "18_blur.mach"
+out = "bin/18_blur"
+targets = ["*"]
+link = []
+need = ["artifact.shader-lesson18_*"]
+
+[artifact.shader-lesson18_vert]
+kind = "bin"
+entry = "shaders/lesson18_vert.mach"
+out = "spv/lesson18_vert{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.shader-lesson18_frag]
+kind = "bin"
+entry = "shaders/lesson18_frag.mach"
+out = "spv/lesson18_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+

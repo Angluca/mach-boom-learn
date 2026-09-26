@@ -1,0 +1,560 @@
+# 第18课 Fragment Shader（片段着色器）
+#
+# 当前画面的处理顺序：
+#
+#     RenderTarget Texture
+#             ↓
+#         Pixelation
+#             ↓
+#      Neighborhood Sampling
+#             ↓
+#             Blur
+#             ↓
+#     Chromatic Aberration
+#             ↓
+#          Vignette
+#             ↓
+#         Color Tint
+#             ↓
+#        最终颜色
+#
+# Blur 的核心：
+#
+#     当前 Pixel
+#         ↓
+#     周围 3 × 3 邻域
+#         ↓
+#     9 个 Texture Samples
+#         ↓
+#     Weighted Average
+#         ↓
+#     更柔和的颜色
+#
+# Kernel：
+#
+#     1 2 1
+#     2 4 2
+#     1 2 1
+#
+# 总权重：
+#
+#     16
+#
+# 当前课程继续保留 Chromatic Aberration，
+# 因此 R / G / B 分别使用各自的 UV 做 Blur。
+#
+#     R → 9 samples
+#     G → 9 samples
+#     B → 9 samples
+#
+# 总计：
+#
+#     27 Texture Samples / Fragment
+
+use tex: shader.texture;
+
+rec Params {
+    tint: f32x4;
+    amount: f32x4;
+}
+
+# RenderTarget 的颜色 Texture。
+#[sampler(0, 1)]
+var source: tex.Sampler2D;
+
+# 游戏自己的后处理参数。
+#[uniform(0, 4)]
+var params: Params;
+
+#[input(0)]
+var in_uv: f32x2;
+
+#[output(0)]
+var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    # --------------------------------------------------------
+    # 后处理强度
+    # --------------------------------------------------------
+
+    val amount: f32 =
+        params.amount[0];
+
+    # --------------------------------------------------------
+    # Screen Space
+    # --------------------------------------------------------
+
+    # 把 0.0 ~ 1.0 的 UV 移动到 -1.0 ~ 1.0。
+    val centered_x: f32 =
+        (in_uv[0] - 0.5) * 2.0;
+
+    val centered_y: f32 =
+        (in_uv[1] - 0.5) * 2.0;
+
+    # 当前 Pixel 到屏幕中心的平方距离。
+    val radius2: f32 =
+        centered_x * centered_x
+        + centered_y * centered_y;
+
+    # --------------------------------------------------------
+    # 第17课：Pixelation
+    # --------------------------------------------------------
+
+    # RenderTarget：
+    #
+    #     640 × 360
+    #
+    # amount 越大，Pixel Grid 越粗。
+    val cells_x: f32 =
+        128.0 - amount * 112.0;
+
+    val cells_y: f32 =
+        72.0 - amount * 63.0;
+
+    # UV 都在 0.0 ~ 1.0 范围内。
+    # 转成 i32 后得到当前 Grid Cell。
+    val cell_x: i32 =
+        (in_uv[0] * cells_x)::i32;
+
+    val cell_y: i32 =
+        (in_uv[1] * cells_y)::i32;
+
+    # Cell 左上角对应的采样位置。
+    val pixel_uv: f32x2 =
+        f32x2{
+            cell_x::f32 / cells_x,
+            cell_y::f32 / cells_y
+        };
+
+    # --------------------------------------------------------
+    # 第16课：Chromatic Aberration
+    # --------------------------------------------------------
+
+    # 根据当前 Pixel 离屏幕中心的距离，
+    # 决定 RGB 各自的 UV 偏移。
+    val spread: f32 =
+        amount * 0.008;
+
+    val offset_x: f32 =
+        centered_x * spread;
+
+    val offset_y: f32 =
+        centered_y * spread;
+
+    # R 向外偏移。
+    val red_uv: f32x2 =
+        f32x2{
+            pixel_uv[0] + offset_x,
+            pixel_uv[1] + offset_y
+        };
+
+    # G 使用中心位置。
+    val green_uv: f32x2 =
+        pixel_uv;
+
+    # B 向相反方向偏移。
+    val blue_uv: f32x2 =
+        f32x2{
+            pixel_uv[0] - offset_x,
+            pixel_uv[1] - offset_y
+        };
+
+    # --------------------------------------------------------
+    # Blur：Texel Size
+    # --------------------------------------------------------
+
+    # RenderTarget 是 640 × 360。
+    #
+    # 一个 Texture Texel 的尺寸：
+    #
+    #     X = 1 / 640
+    #     Y = 1 / 360
+    #
+    # 之后用它向上下左右移动一个 Texel。
+    val texel_x: f32 =
+        1.0 / 640.0;
+
+    val texel_y: f32 =
+        1.0 / 360.0;
+
+    # --------------------------------------------------------
+    # Blur：Kernel Weight
+    # --------------------------------------------------------
+    #
+    #     1 2 1
+    #     2 4 2
+    #     1 2 1
+    #
+    # 除以 16 后：
+    #
+    #     1 / 16
+    #     2 / 16
+    #     4 / 16
+    #
+    # 使用 f32x4 是为了让后面的
+    # f32x4 * weight 保持相同类型。
+
+    val w1: f32x4 =
+        f32x4{
+            0.0625,
+            0.0625,
+            0.0625,
+            0.0625
+        };
+
+    val w2: f32x4 =
+        f32x4{
+            0.125,
+            0.125,
+            0.125,
+            0.125
+        };
+
+    val w4: f32x4 =
+        f32x4{
+            0.25,
+            0.25,
+            0.25,
+            0.25
+        };
+
+    # ========================================================
+    # R：3 × 3 Neighborhood Sampling
+    # ========================================================
+
+    val red_tl: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                red_uv[0] - texel_x,
+                red_uv[1] - texel_y
+            }
+        );
+
+    val red_tc: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                red_uv[0],
+                red_uv[1] - texel_y
+            }
+        );
+
+    val red_tr: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                red_uv[0] + texel_x,
+                red_uv[1] - texel_y
+            }
+        );
+
+    val red_ml: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                red_uv[0] - texel_x,
+                red_uv[1]
+            }
+        );
+
+    val red_mc: f32x4 =
+        tex.sample_2d(
+            source,
+            red_uv
+        );
+
+    val red_mr: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                red_uv[0] + texel_x,
+                red_uv[1]
+            }
+        );
+
+    val red_bl: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                red_uv[0] - texel_x,
+                red_uv[1] + texel_y
+            }
+        );
+
+    val red_bc: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                red_uv[0],
+                red_uv[1] + texel_y
+            }
+        );
+
+    val red_br: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                red_uv[0] + texel_x,
+                red_uv[1] + texel_y
+            }
+        );
+
+    # 3 × 3 Gaussian-like Weighted Average。
+    val red_blur: f32x4 =
+        red_tl * w1
+        + red_tc * w2
+        + red_tr * w1
+        + red_ml * w2
+        + red_mc * w4
+        + red_mr * w2
+        + red_bl * w1
+        + red_bc * w2
+        + red_br * w1;
+
+    # ========================================================
+    # G：3 × 3 Neighborhood Sampling
+    # ========================================================
+
+    val green_tl: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                green_uv[0] - texel_x,
+                green_uv[1] - texel_y
+            }
+        );
+
+    val green_tc: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                green_uv[0],
+                green_uv[1] - texel_y
+            }
+        );
+
+    val green_tr: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                green_uv[0] + texel_x,
+                green_uv[1] - texel_y
+            }
+        );
+
+    val green_ml: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                green_uv[0] - texel_x,
+                green_uv[1]
+            }
+        );
+
+    val green_mc: f32x4 =
+        tex.sample_2d(
+            source,
+            green_uv
+        );
+
+    val green_mr: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                green_uv[0] + texel_x,
+                green_uv[1]
+            }
+        );
+
+    val green_bl: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                green_uv[0] - texel_x,
+                green_uv[1] + texel_y
+            }
+        );
+
+    val green_bc: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                green_uv[0],
+                green_uv[1] + texel_y
+            }
+        );
+
+    val green_br: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                green_uv[0] + texel_x,
+                green_uv[1] + texel_y
+            }
+        );
+
+    val green_blur: f32x4 =
+        green_tl * w1
+        + green_tc * w2
+        + green_tr * w1
+        + green_ml * w2
+        + green_mc * w4
+        + green_mr * w2
+        + green_bl * w1
+        + green_bc * w2
+        + green_br * w1;
+
+    # ========================================================
+    # B：3 × 3 Neighborhood Sampling
+    # ========================================================
+
+    val blue_tl: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                blue_uv[0] - texel_x,
+                blue_uv[1] - texel_y
+            }
+        );
+
+    val blue_tc: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                blue_uv[0],
+                blue_uv[1] - texel_y
+            }
+        );
+
+    val blue_tr: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                blue_uv[0] + texel_x,
+                blue_uv[1] - texel_y
+            }
+        );
+
+    val blue_ml: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                blue_uv[0] - texel_x,
+                blue_uv[1]
+            }
+        );
+
+    val blue_mc: f32x4 =
+        tex.sample_2d(
+            source,
+            blue_uv
+        );
+
+    val blue_mr: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                blue_uv[0] + texel_x,
+                blue_uv[1]
+            }
+        );
+
+    val blue_bl: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                blue_uv[0] - texel_x,
+                blue_uv[1] + texel_y
+            }
+        );
+
+    val blue_bc: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                blue_uv[0],
+                blue_uv[1] + texel_y
+            }
+        );
+
+    val blue_br: f32x4 =
+        tex.sample_2d(
+            source,
+            f32x2{
+                blue_uv[0] + texel_x,
+                blue_uv[1] + texel_y
+            }
+        );
+
+    val blue_blur: f32x4 =
+        blue_tl * w1
+        + blue_tc * w2
+        + blue_tr * w1
+        + blue_ml * w2
+        + blue_mc * w4
+        + blue_mr * w2
+        + blue_bl * w1
+        + blue_bc * w2
+        + blue_br * w1;
+
+    # --------------------------------------------------------
+    # 重新组合 RGB
+    # --------------------------------------------------------
+
+    val sampled: f32x4 =
+        f32x4{
+            red_blur[0],
+            green_blur[1],
+            blue_blur[2],
+            green_blur[3]
+        };
+
+    # --------------------------------------------------------
+    # 第14课：Vignette
+    # --------------------------------------------------------
+
+    val vignette_strength: f32 =
+        0.55 + amount * 0.65;
+
+    var vignette: f32 =
+        1.0 - radius2 * vignette_strength;
+
+    if (vignette < 0.0) {
+        vignette = 0.0;
+    }
+
+    val vignetted: f32x4 =
+        f32x4{
+            sampled[0] * vignette,
+            sampled[1] * vignette,
+            sampled[2] * vignette,
+            sampled[3]
+        };
+
+    # --------------------------------------------------------
+    # 第15课：Color Tint
+    # --------------------------------------------------------
+
+    val tinted: f32x4 =
+        f32x4{
+            vignetted[0] * params.tint[0],
+            vignetted[1] * params.tint[1],
+            vignetted[2] * params.tint[2],
+            vignetted[3]
+        };
+
+    # amount：
+    #
+    #     0.0 → Vignette 后的原色
+    #     1.0 → 完全使用 Tint
+    out_colour =
+        f32x4{
+            vignetted[0] + (tinted[0] - vignetted[0]) * amount,
+            vignetted[1] + (tinted[1] - vignetted[1]) * amount,
+            vignetted[2] + (tinted[2] - vignetted[2]) * amount,
+            vignetted[3]
+        };
+}
+
