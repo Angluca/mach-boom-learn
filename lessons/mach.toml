@@ -323,3 +323,27 @@ targets = ["spirv"]
 link = []
 need = []
 
+[artifact.17_pixelation]
+kind = "bin"
+entry = "17_pixelation.mach"
+out = "bin/17_pixelation"
+targets = ["*"]
+link = []
+need = ["artifact.shader-lesson17_*"]
+
+[artifact.shader-lesson17_vert]
+kind = "bin"
+entry = "shaders/lesson17_vert.mach"
+out = "spv/lesson17_vert{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.shader-lesson17_frag]
+kind = "bin"
+entry = "shaders/lesson17_frag.mach"
+out = "spv/lesson17_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+

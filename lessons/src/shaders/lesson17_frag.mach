@@ -1,0 +1,221 @@
+# Lesson 17 Fragment Shader
+#
+# Processing order for the current image:
+#
+#     RenderTarget Texture
+#             ↓
+#         Pixelation
+#             ↓
+#     Chromatic Aberration
+#             ↓
+#          Vignette
+#             ↓
+#         Color Tint
+#             ↓
+#        final color
+#
+# The key to Pixelation:
+#
+#     Original UV:
+#
+#         each Pixel may use a different UV
+#
+#     Pixelation:
+#
+#         constrain UV to a smaller grid
+#
+#     As a result, Pixels within the same grid region
+#     read from the same Texture position.
+
+use tex: shader.texture;
+
+rec Params {
+    tint: f32x4;
+    amount: f32x4;
+}
+
+# The RenderTarget's color Texture.
+#[sampler(0, 1)]
+var source: tex.Sampler2D;
+
+# The game's own post-processing parameters.
+#[uniform(0, 4)]
+var params: Params;
+
+#[input(0)]
+var in_uv: f32x2;
+
+#[output(0)]
+var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    # --------------------------------------------------------
+    # Post-processing strength
+    # --------------------------------------------------------
+    val amount: f32 =
+        params.amount[0];
+
+    # --------------------------------------------------------
+    # Lesson 17: Pixelation
+    # --------------------------------------------------------
+    #
+    # RenderTarget:
+    #
+    #     640 × 360
+    #
+    # Use a base grid of 128 × 72,
+    # which roughly corresponds to a 5 × 5 pixel area.
+    #
+    # As amount increases:
+    #
+    #     128 × 72
+    #         ↓
+    #      16 × 9
+    #
+    # The grid becomes coarser and coarser,
+    # and each color block becomes larger and larger.
+    val cells_x: f32 =
+        128.0 - amount * 112.0;
+
+    val cells_y: f32 =
+        72.0 - amount * 63.0;
+
+    # UV is in the range 0.0 ~ 1.0,
+    # and converting to i32 gives the current grid index.
+    #
+    # For positive numbers, the truncation here behaves the same as floor.
+    val cell_x: i32 =
+        (in_uv[0] * cells_x)::i32;
+
+    val cell_y: i32 =
+        (in_uv[1] * cells_y)::i32;
+
+    # Convert the grid index back to UV.
+    #
+    # Pixels in the same grid
+    # get exactly the same pixel_uv.
+    val pixel_uv: f32x2 =
+        f32x2{
+            cell_x::f32 / cells_x,
+            cell_y::f32 / cells_y
+        };
+
+    # --------------------------------------------------------
+    # Lesson 16: Chromatic Aberration
+    # --------------------------------------------------------
+    #
+    # Based on the current Pixel's distance from the screen center,
+    # decide how much each RGB channel is offset.
+    val centered_x: f32 =
+        (in_uv[0] - 0.5) * 2.0;
+
+    val centered_y: f32 =
+        (in_uv[1] - 0.5) * 2.0;
+
+    val radius2: f32 =
+        centered_x * centered_x
+        + centered_y * centered_y;
+
+    val spread: f32 =
+        amount * 0.008;
+
+    val offset_x: f32 =
+        centered_x * spread;
+
+    val offset_y: f32 =
+        centered_y * spread;
+
+    # Continue RGB separation on the pixelated UV.
+    val red_uv: f32x2 =
+        f32x2{
+            pixel_uv[0] + offset_x,
+            pixel_uv[1] + offset_y
+        };
+
+    val green_uv: f32x2 =
+        pixel_uv;
+
+    val blue_uv: f32x2 =
+        f32x2{
+            pixel_uv[0] - offset_x,
+            pixel_uv[1] - offset_y
+        };
+
+    # Read the three color channels separately.
+    val red_texel: f32x4 =
+        tex.sample_2d(
+            source,
+            red_uv
+        );
+
+    val green_texel: f32x4 =
+        tex.sample_2d(
+            source,
+            green_uv
+        );
+
+    val blue_texel: f32x4 =
+        tex.sample_2d(
+            source,
+            blue_uv
+        );
+
+    # Recombine RGB.
+    val sampled: f32x4 =
+        f32x4{
+            red_texel[0],
+            green_texel[1],
+            blue_texel[2],
+            green_texel[3]
+        };
+
+    # --------------------------------------------------------
+    # Lesson 14: Vignette
+    # --------------------------------------------------------
+    #
+    # The higher amount is, the stronger the Vignette.
+    val vignette_strength: f32 =
+        0.55 + amount * 0.65;
+
+    var vignette: f32 =
+        1.0 - radius2 * vignette_strength;
+
+    if (vignette < 0.0) {
+        vignette = 0.0;
+    }
+
+    val vignetted: f32x4 =
+        f32x4{
+            sampled[0] * vignette,
+            sampled[1] * vignette,
+            sampled[2] * vignette,
+            sampled[3]
+        };
+
+    # --------------------------------------------------------
+    # Lesson 15: Color Tint
+    # --------------------------------------------------------
+    #
+    # Tint still comes from binding 4.
+    val tinted: f32x4 =
+        f32x4{
+            vignetted[0] * params.tint[0],
+            vignetted[1] * params.tint[1],
+            vignetted[2] * params.tint[2],
+            vignetted[3]
+        };
+
+    # amount:
+    #
+    #     0.0 → original color after Vignette
+    #     1.0 → fully use Tint
+    out_colour =
+        f32x4{
+            vignetted[0] + (tinted[0] - vignetted[0]) * amount,
+            vignetted[1] + (tinted[1] - vignetted[1]) * amount,
+            vignetted[2] + (tinted[2] - vignetted[2]) * amount,
+            vignetted[3]
+        };
+}
+

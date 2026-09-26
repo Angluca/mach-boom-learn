@@ -1,0 +1,221 @@
+# 第17课 Fragment Shader（片段着色器）
+#
+# 当前画面的处理顺序：
+#
+#     RenderTarget Texture
+#             ↓
+#         Pixelation
+#             ↓
+#     Chromatic Aberration
+#             ↓
+#          Vignette
+#             ↓
+#         Color Tint
+#             ↓
+#        最终颜色
+#
+# Pixelation 的关键：
+#
+#     原始 UV：
+#
+#         每个 Pixel 都可能使用不同的 UV
+#
+#     像素化：
+#
+#         把 UV 限制到较小的网格
+#
+#     于是同一个网格区域中的 Pixel
+#     会读取同一个 Texture 位置。
+
+use tex: shader.texture;
+
+rec Params {
+    tint: f32x4;
+    amount: f32x4;
+}
+
+# RenderTarget 的颜色 Texture。
+#[sampler(0, 1)]
+var source: tex.Sampler2D;
+
+# 游戏自己的后处理参数。
+#[uniform(0, 4)]
+var params: Params;
+
+#[input(0)]
+var in_uv: f32x2;
+
+#[output(0)]
+var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    # --------------------------------------------------------
+    # 后处理强度
+    # --------------------------------------------------------
+    val amount: f32 =
+        params.amount[0];
+
+    # --------------------------------------------------------
+    # 第17课：Pixelation
+    # --------------------------------------------------------
+    #
+    # RenderTarget：
+    #
+    #     640 × 360
+    #
+    # 使用 128 × 72 的基础网格，
+    # 大约对应 5 × 5 像素的区域。
+    #
+    # 当 amount 增加时：
+    #
+    #     128 × 72
+    #         ↓
+    #      16 × 9
+    #
+    # 网格越来越粗，
+    # 每个颜色块也越来越大。
+    val cells_x: f32 =
+        128.0 - amount * 112.0;
+
+    val cells_y: f32 =
+        72.0 - amount * 63.0;
+
+    # UV 都在 0.0 ~ 1.0 范围内，
+    # 转成 i32 后得到当前网格编号。
+    #
+    # 对正数来说，这里的截断效果与 floor 相同。
+    val cell_x: i32 =
+        (in_uv[0] * cells_x)::i32;
+
+    val cell_y: i32 =
+        (in_uv[1] * cells_y)::i32;
+
+    # 再把网格编号转换回 UV。
+    #
+    # 同一个网格中的 Pixel
+    # 得到完全相同的 pixel_uv。
+    val pixel_uv: f32x2 =
+        f32x2{
+            cell_x::f32 / cells_x,
+            cell_y::f32 / cells_y
+        };
+
+    # --------------------------------------------------------
+    # 第16课：Chromatic Aberration
+    # --------------------------------------------------------
+    #
+    # 根据当前 Pixel 离屏幕中心的距离，
+    # 决定 RGB 通道各自偏移多少。
+    val centered_x: f32 =
+        (in_uv[0] - 0.5) * 2.0;
+
+    val centered_y: f32 =
+        (in_uv[1] - 0.5) * 2.0;
+
+    val radius2: f32 =
+        centered_x * centered_x
+        + centered_y * centered_y;
+
+    val spread: f32 =
+        amount * 0.008;
+
+    val offset_x: f32 =
+        centered_x * spread;
+
+    val offset_y: f32 =
+        centered_y * spread;
+
+    # 在像素化后的 UV 上继续进行 RGB 分离。
+    val red_uv: f32x2 =
+        f32x2{
+            pixel_uv[0] + offset_x,
+            pixel_uv[1] + offset_y
+        };
+
+    val green_uv: f32x2 =
+        pixel_uv;
+
+    val blue_uv: f32x2 =
+        f32x2{
+            pixel_uv[0] - offset_x,
+            pixel_uv[1] - offset_y
+        };
+
+    # 分别读取三个颜色通道。
+    val red_texel: f32x4 =
+        tex.sample_2d(
+            source,
+            red_uv
+        );
+
+    val green_texel: f32x4 =
+        tex.sample_2d(
+            source,
+            green_uv
+        );
+
+    val blue_texel: f32x4 =
+        tex.sample_2d(
+            source,
+            blue_uv
+        );
+
+    # 重新组合 RGB。
+    val sampled: f32x4 =
+        f32x4{
+            red_texel[0],
+            green_texel[1],
+            blue_texel[2],
+            green_texel[3]
+        };
+
+    # --------------------------------------------------------
+    # 第14课：Vignette
+    # --------------------------------------------------------
+    #
+    # amount 越高，Vignette 越强。
+    val vignette_strength: f32 =
+        0.55 + amount * 0.65;
+
+    var vignette: f32 =
+        1.0 - radius2 * vignette_strength;
+
+    if (vignette < 0.0) {
+        vignette = 0.0;
+    }
+
+    val vignetted: f32x4 =
+        f32x4{
+            sampled[0] * vignette,
+            sampled[1] * vignette,
+            sampled[2] * vignette,
+            sampled[3]
+        };
+
+    # --------------------------------------------------------
+    # 第15课：Color Tint
+    # --------------------------------------------------------
+    #
+    # Tint 仍然来自 binding 4。
+    val tinted: f32x4 =
+        f32x4{
+            vignetted[0] * params.tint[0],
+            vignetted[1] * params.tint[1],
+            vignetted[2] * params.tint[2],
+            vignetted[3]
+        };
+
+    # amount：
+    #
+    #     0.0 → Vignette 后的原色
+    #     1.0 → 完全使用 Tint
+    out_colour =
+        f32x4{
+            vignetted[0] + (tinted[0] - vignetted[0]) * amount,
+            vignetted[1] + (tinted[1] - vignetted[1]) * amount,
+            vignetted[2] + (tinted[2] - vignetted[2]) * amount,
+            vignetted[3]
+        };
+}
+
