@@ -1,7 +1,7 @@
 [project]
 id = "base_window"
 version = "0.1.0"
-mach = "^5"
+mach = "^6"
 src = "src-cn"
 out = "out"
 #out = "out/{target.name}/{profile.name}"
@@ -33,14 +33,14 @@ opt = 0
 debug = true
 simd = "scalarize"
 vectorize = false
-float_reassoc = false
+float_reassoc = true
 
 [profile.release]
 opt = 2
 debug = false
 simd = "scalarize"
 vectorize = false
-float_reassoc = false
+float_reassoc = true
 
 [dep.boom]
 #path = "dep/boom"
@@ -51,35 +51,35 @@ ref = "branch/main"
 git = "https://github.com/briar-systems/mach-std"
 ref = "branch/main"
 
-[dep.glfw]
-git = "https://github.com/briar-systems/mach-glfw"
-ref = "branch/main"
+#[dep.glfw]
+#git = "https://github.com/briar-systems/mach-glfw"
+#ref = "branch/main"
 
-[dep.image]
-git = "https://github.com/briar-systems/mach-image"
-ref = "branch/main"
+#[dep.image]
+#git = "https://github.com/briar-systems/mach-image"
+#ref = "branch/main"
 
-[dep.gltf]
-git = "https://github.com/briar-systems/mach-gltf"
-ref = "branch/main"
+#[dep.gltf]
+#git = "https://github.com/briar-systems/mach-gltf"
+#ref = "branch/main"
 
-# boom links these transitively, but a consumer must still name every dep it
-# shares with a path dependency and match its ref exactly.
-[dep.audio]
-git = "https://github.com/briar-systems/mach-audio"
-ref = "branch/main"
+## boom links these transitively, but a consumer must still name every dep it
+## shares with a path dependency and match its ref exactly.
+#[dep.audio]
+#git = "https://github.com/briar-systems/mach-audio"
+#ref = "branch/main"
 
-[dep.font]
-git = "https://github.com/briar-systems/mach-font"
-ref = "branch/dev"
+#[dep.font]
+#git = "https://github.com/briar-systems/mach-font"
+#ref = "branch/dev"
 
-[dep.phys]
-git = "https://github.com/briar-systems/mach-phys"
-ref = "branch/main"
+#[dep.phys]
+#git = "https://github.com/briar-systems/mach-phys"
+#ref = "branch/main"
 
-[dep.vk]
-git = "https://github.com/briar-systems/mach-vk"
-ref = "branch/main"
+#[dep.vk]
+#git = "https://github.com/briar-systems/mach-vk"
+#ref = "branch/main"
 
 # ----------------------------------------------
 [artifact.1_hello_window]
