@@ -28,7 +28,7 @@ all: $(TARGETS)
 
 $(TARGETS): %: %.mach
 	@rm -rf ./out/bin/$@$(EXE)
-	mach build . $(MFLAGS) -v --bin $@$
+	mach build . $(MFLAGS) -v -a $@$
 
 RUN_TARGET := $(firstword $(filter-out run,$(MAKECMDGOALS)))
 ifeq ($(RUN_TARGET),)

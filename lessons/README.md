@@ -24,10 +24,10 @@ make run file_name ARGS="-L libs/path"
 ## Use Mach
 ```zsh
 # build
-mach build . --bin file_name
+mach build . -a file_name
 # or
-mach build . -L libs/path --bin file_name
+mach build . -L libs/path -a file_name
 
 # run
-mach run . --bin file_name
+mach run . -a file_name
 ```

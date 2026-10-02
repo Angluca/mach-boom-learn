@@ -1,5 +1,5 @@
 [project]
-id = "base_window"
+id = "lessons"
 version = "0.1.0"
 mach = "^6"
 src = "src-cn"
@@ -32,18 +32,17 @@ default = true
 opt = 0
 debug = true
 simd = "scalarize"
-vectorize = false
-float_reassoc = true
+vectorize = true
+float_reassoc = false
 
 [profile.release]
 opt = 2
 debug = false
 simd = "scalarize"
-vectorize = false
-float_reassoc = true
+vectorize = true
+float_reassoc = false
 
 [dep.boom]
-#path = "dep/boom"
 git = "https://github.com/briar-systems/boom"
 ref = "branch/main"
 
