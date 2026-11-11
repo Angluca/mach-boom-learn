@@ -136,6 +136,13 @@ fun main(argc: i64, argv: **u8) i64 {
     # err：
     #    游戏循环自身发生错误。
     val ran: res[i64, EngineError] = run(?ctx, ?app);
+    if (sel ran.err) {
+        print.eprintlnf(
+            "游戏循环失败：{}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
 
     # run() 内部已经调用了 f_dnit。
     # 所以这里最后关闭 Context。
@@ -144,14 +151,6 @@ fun main(argc: i64, argv: **u8) i64 {
         print.eprintlnf(
             "Context 关闭失败：{}",
             context_error_message(closed.err),
-        );
-        ret 1;
-    }
-
-    if (sel ran.err) {
-        print.eprintlnf(
-            "游戏循环失败：{}",
-            engine_error_message(ran.err),
         );
         ret 1;
     }

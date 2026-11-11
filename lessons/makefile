@@ -38,7 +38,7 @@ endif
 endif
 
 run: $(RUN_TARGET)
-	mach run . --bin $(RUN_TARGET)
+	mach run . -a $(RUN_TARGET)
 
 clean:
 	@rm -rf ./out

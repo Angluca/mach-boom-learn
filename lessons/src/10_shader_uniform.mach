@@ -631,6 +631,13 @@ fun main(argc: i64, argv: **u8) i64 {
         ?ctx,
         ?app,
     );
+    if (sel ran.err) {
+        print.eprintlnf(
+            "Game loop failed: {}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
 
     # Shut down the Context.
     val closed: err[ContextError] = context_shutdown(
@@ -640,14 +647,6 @@ fun main(argc: i64, argv: **u8) i64 {
         print.eprintlnf(
             "Context shutdown failed: {}",
             context_error_message(closed.err),
-        );
-        ret 1;
-    }
-
-    if (sel ran.err) {
-        print.eprintlnf(
-            "Game loop failed: {}",
-            engine_error_message(ran.err),
         );
         ret 1;
     }

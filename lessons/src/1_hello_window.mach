@@ -138,6 +138,13 @@ fun main(argc: i64, argv: **u8) i64 {
     # err:
     #    The game loop itself encountered an error.
     val ran: res[i64, EngineError] = run(?ctx, ?app);
+    if (sel ran.err) {
+        print.eprintlnf(
+            "Game loop failed: {}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
 
     # run() already calls f_dnit internally.
     # So here we finally shut down the Context.
@@ -146,14 +153,6 @@ fun main(argc: i64, argv: **u8) i64 {
         print.eprintlnf(
             "Context shutdown failed: {}",
             context_error_message(closed.err),
-        );
-        ret 1;
-    }
-
-    if (sel ran.err) {
-        print.eprintlnf(
-            "Game loop failed: {}",
-            engine_error_message(ran.err),
         );
         ret 1;
     }

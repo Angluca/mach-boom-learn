@@ -1,7 +1,7 @@
 ## mach boom study
 * download deps
 ```zsh
-mach dep pull .
+mach dep update . --all
 ```
 ## Set project.src path in mach.toml
 ```toml

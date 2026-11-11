@@ -549,6 +549,13 @@ fun main(argc: i64, argv: **u8) i64 {
         ?ctx,
         ?app,
     );
+    if (sel ran.err) {
+        print.eprintlnf(
+            "游戏循环失败：{}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
 
     # 关闭 Context。
     val closed: err[ContextError] = context_shutdown(
@@ -558,14 +565,6 @@ fun main(argc: i64, argv: **u8) i64 {
         print.eprintlnf(
             "Context 关闭失败：{}",
             context_error_message(closed.err),
-        );
-        ret 1;
-    }
-
-    if (sel ran.err) {
-        print.eprintlnf(
-            "游戏循环失败：{}",
-            engine_error_message(ran.err),
         );
         ret 1;
     }

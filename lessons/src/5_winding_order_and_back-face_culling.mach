@@ -430,20 +430,19 @@ fun main(argc: i64, argv: **u8) i64 {
     );
 
     val ran: res[i64, EngineError] = run(?ctx, ?app);
+    if (sel ran.err) {
+        print.eprintlnf(
+            "Game loop failed: {}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
 
     val closed: err[ContextError] = context_shutdown(?ctx);
     if (sel closed.err) {
         print.eprintlnf(
             "Context shutdown failed: {}",
             context_error_message(closed.err),
-        );
-        ret 1;
-    }
-
-    if (sel ran.err) {
-        print.eprintlnf(
-            "Game loop failed: {}",
-            engine_error_message(ran.err),
         );
         ret 1;
     }

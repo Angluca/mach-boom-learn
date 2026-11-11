@@ -676,14 +676,14 @@ fun main(argc: i64, argv: **u8) i64 {
     val ran: res[i64, EngineError] =
         run(?ctx, ?app);
 
+    if (sel ran.err) {
+        ret 1;
+    }
+
     val closed: err[ContextError] =
         context_shutdown(?ctx);
 
     if (sel closed.err) {
-        ret 1;
-    }
-
-    if (sel ran.err) {
         ret 1;
     }
 

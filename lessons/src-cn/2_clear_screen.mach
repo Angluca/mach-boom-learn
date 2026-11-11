@@ -213,20 +213,19 @@ fun main(argc: i64, argv: **u8) i64 {
     );
 
     val ran: res[i64, EngineError] = run(?ctx, ?app);
+    if (sel ran.err) {
+        print.eprintlnf(
+            "游戏循环失败：{}",
+            engine_error_message(ran.err),
+        );
+        ret 1;
+    }
 
     val closed: err[ContextError] = context_shutdown(?ctx);
     if (sel closed.err) {
         print.eprintlnf(
             "Context 关闭失败：{}",
             context_error_message(closed.err),
-        );
-        ret 1;
-    }
-
-    if (sel ran.err) {
-        print.eprintlnf(
-            "游戏循环失败：{}",
-            engine_error_message(ran.err),
         );
         ret 1;
     }
